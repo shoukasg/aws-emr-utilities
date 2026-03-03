@@ -114,7 +114,8 @@ ssh -i "$SSH_KEY" hadoop@"$SOURCE_CLUSTER_MASTER" \
     "sudo -u hbase nohup hbase snapshot export \
     -Dfs.s3a.etag.checksum.enabled=true \
     -snapshot $SNAPSHOT_NAME \
-    -copy-to $DEST_BUCKET_PATH > /tmp/export-$SNAPSHOT_NAME.log 2>&1 &"
+    -copy-to $DEST_BUCKET_PATH \
+    -mappers 200 > /tmp/export-$SNAPSHOT_NAME.log 2>&1 &"
 
 # Wait a moment for job to start
 sleep 5
