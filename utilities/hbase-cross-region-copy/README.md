@@ -22,6 +22,10 @@ This script automates the process of copying HBase snapshots between AWS regions
 - AWS CLI configured with appropriate permissions
 - IAM permissions for S3 operations on both source and destination buckets
 
+**IMPORTANT: EMR Release Version Compatibility**
+
+When migrating HBase operations to a different region, we strongly recommend using the same EMR release version on both source and destination clusters. This ensures compatibility and prevents potential issues with HBase metadata and data formats.
+
 **IMPORTANT: Write Downtime Requirement**
 
 All HBase writes to the source cluster must be stopped before taking the snapshot. Any writes that occur after the snapshot is taken will NOT be included in the copy and will be lost in the destination cluster.
@@ -30,11 +34,13 @@ If your use case cannot tolerate write downtime during the snapshot and copy pro
 
 ## Usage
 
+### Option 1: Copy a Single Snapshot
+
 ```bash
 ./hbase-cross-region-copy.sh <source_cluster_master> <source_bucket_path> <dest_bucket_path> <snapshot_name> [ssh_key]
 ```
 
-### Arguments
+#### Arguments
 
 | Argument | Description | Required |
 |----------|-------------|----------|
@@ -46,13 +52,13 @@ If your use case cannot tolerate write downtime during the snapshot and copy pro
 
 **Note:** If the snapshot doesn't exist, the script will automatically create it from the table name. The snapshot name should follow the format: `snap_<tablename>_<timestamp>` (e.g., `snap_my_table_20260302`).
 
-### Example
+#### Example
 
 ```bash
 ./hbase-cross-region-copy.sh \
-  ec2-3-85-123-155.compute-1.amazonaws.com \
-  s3://source-bucket-us-east-1/hbase/ \
-  s3://dest-bucket-ap-south-1/hbase/ \
+  ec2-3-85-123-155.me-central-1.compute.amazonaws.com \
+  s3://source-bucket-me-central-1/hbase/ \
+  s3://dest-bucket-us-east-1/hbase/ \
   snap_my_table_20260302 \
   ~/.ssh/my-emr-key.pem
 ```
@@ -61,6 +67,55 @@ If the snapshot `snap_my_table_20260302` doesn't exist, the script will:
 1. Extract the table name (`my_table`)
 2. Create the snapshot from that table
 3. Export it to the destination
+
+### Option 2: Copy All Tables Automatically
+
+For copying all tables in a cluster at once:
+
+```bash
+./hbase-cross-region-copy-all-tables.sh <source_cluster_master> <source_bucket_path> <dest_bucket_path> [ssh_key] [--yes]
+```
+
+This script will:
+1. List all tables on the source cluster
+2. Create snapshots for each table with timestamp
+3. Export all snapshots to the destination bucket sequentially
+4. Provide a summary of successful and failed exports
+
+#### Arguments
+
+| Argument | Description | Required |
+|----------|-------------|----------|
+| `source_cluster_master` | EMR master node hostname or IP address | Yes |
+| `source_bucket_path` | S3 path where HBase data currently resides | Yes |
+| `dest_bucket_path` | S3 path where data should be copied | Yes |
+| `ssh_key` | SSH key to access EMR cluster | No (default: ~/.ssh/id_rsa) |
+| `--yes` or `-y` | Skip confirmation prompt for non-interactive execution | No |
+
+#### Example (Interactive)
+
+```bash
+./hbase-cross-region-copy-all-tables.sh \
+  ec2-3-85-123-155.me-central-1.compute.amazonaws.com \
+  s3://source-bucket-me-central-1/hbase/ \
+  s3://dest-bucket-us-east-1/hbase/ \
+  ~/.ssh/my-emr-key.pem
+```
+
+The script will prompt for confirmation before proceeding with the copy operation.
+
+#### Example (Non-Interactive)
+
+```bash
+./hbase-cross-region-copy-all-tables.sh \
+  ec2-3-85-123-155.me-central-1.compute.amazonaws.com \
+  s3://source-bucket-me-central-1/hbase/ \
+  s3://dest-bucket-us-east-1/hbase/ \
+  ~/.ssh/my-emr-key.pem \
+  --yes
+```
+
+Use the `--yes` flag to skip the confirmation prompt, useful for automation and scripting.
 
 ## How It Works
 
@@ -229,9 +284,9 @@ echo "snapshot 'my_table', 'snap_my_table_20260302'" | hbase shell
 
 # 3. Copy to destination region
 ./hbase-cross-region-copy.sh \
-  ec2-source.compute-1.amazonaws.com \
-  s3://source-bucket/hbase/ \
-  s3://dest-bucket/hbase/ \
+  ec2-source.me-central-1.compute.amazonaws.com \
+  s3://source-bucket-me-central-1/hbase/ \
+  s3://dest-bucket-us-east-1/hbase/ \
   snap_my_table_20260302 \
   ~/.ssh/source-key.pem
 ```
@@ -240,7 +295,7 @@ echo "snapshot 'my_table', 'snap_my_table_20260302'" | hbase shell
 ```bash
 # 4. Import snapshot
 ./hbase-import-snapshots.sh \
-  ec2-dest.ap-south-1.compute.amazonaws.com \
+  ec2-dest.us-east-1.compute.amazonaws.com \
   snap_my_table_20260302 \
   ~/.ssh/dest-key.pem
 
