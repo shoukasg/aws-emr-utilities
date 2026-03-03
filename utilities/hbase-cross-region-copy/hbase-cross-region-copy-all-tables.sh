@@ -88,7 +88,7 @@ echo ""
 # Step 1: List all tables
 print_section "Step 1: Listing all tables"
 TABLES=$(ssh -i "$SSH_KEY" hadoop@"$SOURCE_CLUSTER_MASTER" \
-    "echo 'list' | hbase shell 2>&1 | grep -v 'TABLE' | grep -v 'row(s)' | grep -v '^$' | grep -v 'SLF4J' | grep -v 'HBase Shell' | grep -v 'Use' | grep -v 'Version' | grep -v 'Took' | grep -v '=>'" | tr -d ' ')
+    "echo 'list' | hbase shell 2>&1" | grep -E '^[a-zA-Z_][a-zA-Z0-9_]*$' | grep -v 'TABLE')
 
 if [ -z "$TABLES" ]; then
     print_error "No tables found on source cluster"
