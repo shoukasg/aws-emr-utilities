@@ -198,15 +198,30 @@ for SNAPSHOT_NAME in "${SNAPSHOT_LIST[@]}"; do
     done
     
     # Monitor export progress
+    MONITOR_ATTEMPTS=0
+    MAX_MONITOR_ATTEMPTS=360  # 1 hour max (360 * 10 seconds)
+    
     while true; do
         JOB_STATUS=$(ssh -i "$SSH_KEY" hadoop@"$SOURCE_CLUSTER_MASTER" \
-            "yarn application -status $APP_ID 2>&1")
+            "yarn application -status $APP_ID 2>&1" || echo "SSH_ERROR")
         
-        STATE=$(echo "$JOB_STATUS" | grep "State :" | awk '{print $3}')
-        PROGRESS=$(echo "$JOB_STATUS" | grep "Progress :" | awk '{print $3}')
+        if echo "$JOB_STATUS" | grep -q "SSH_ERROR\|Connection refused\|Connection timed out"; then
+            print_error "SSH connection error while monitoring $SNAPSHOT_NAME"
+            FAILED_EXPORTS=$((FAILED_EXPORTS + 1))
+            break
+        fi
+        
+        STATE=$(echo "$JOB_STATUS" | grep -E "^\s*State :" | awk '{print $3}')
+        PROGRESS=$(echo "$JOB_STATUS" | grep -E "^\s*Progress :" | awk '{print $3}')
+        
+        if [ -z "$STATE" ]; then
+            print_error "Unable to get job status for $SNAPSHOT_NAME (APP_ID: $APP_ID)"
+            FAILED_EXPORTS=$((FAILED_EXPORTS + 1))
+            break
+        fi
         
         if [ "$STATE" = "FINISHED" ] || [ "$STATE" = "FAILED" ] || [ "$STATE" = "KILLED" ]; then
-            FINAL_STATE=$(echo "$JOB_STATUS" | grep "Final-State :" | awk '{print $3}')
+            FINAL_STATE=$(echo "$JOB_STATUS" | grep -E "^\s*Final-State :" | awk '{print $3}')
             
             if [ "$FINAL_STATE" = "SUCCEEDED" ]; then
                 print_info "✓ Export completed: $SNAPSHOT_NAME"
@@ -219,6 +234,14 @@ for SNAPSHOT_NAME in "${SNAPSHOT_LIST[@]}"; do
         fi
         
         echo "  Progress: $PROGRESS% (State: $STATE)"
+        
+        MONITOR_ATTEMPTS=$((MONITOR_ATTEMPTS + 1))
+        if [ $MONITOR_ATTEMPTS -ge $MAX_MONITOR_ATTEMPTS ]; then
+            print_error "Monitoring timeout for $SNAPSHOT_NAME after 1 hour"
+            FAILED_EXPORTS=$((FAILED_EXPORTS + 1))
+            break
+        fi
+        
         sleep 10
     done
     
