@@ -149,16 +149,11 @@ while true; do
     STATE=$(echo "$JOB_STATUS" | grep "State :" | awk '{print $3}')
     PROGRESS=$(echo "$JOB_STATUS" | grep "Progress :" | awk '{print $3}')
     
-    # Get mapper count
-    MAPPERS=$(ssh -i "$SSH_KEY" hadoop@"$SOURCE_CLUSTER_MASTER" \
-        "yarn application -status $APP_ID 2>&1 | grep -E 'Total Number of Mappers|Num Maps' | awk '{print \$NF}'" || echo "N/A")
-    
     if [ "$STATE" = "FINISHED" ] || [ "$STATE" = "FAILED" ] || [ "$STATE" = "KILLED" ]; then
         FINAL_STATE=$(echo "$JOB_STATUS" | grep "Final-State :" | awk '{print $3}')
         
         if [ "$FINAL_STATE" = "SUCCEEDED" ]; then
             echo "✓ Export job completed successfully (100%)"
-            echo "  Mappers used: $MAPPERS"
             break
         else
             echo "ERROR: Export job failed with state: $FINAL_STATE"
@@ -167,7 +162,7 @@ while true; do
         fi
     fi
     
-    echo "Progress: $PROGRESS% (State: $STATE, Mappers: $MAPPERS)"
+    echo "Progress: $PROGRESS% (State: $STATE)"
     sleep 10
 done
 echo ""
