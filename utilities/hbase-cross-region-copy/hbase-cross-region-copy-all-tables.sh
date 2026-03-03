@@ -44,22 +44,31 @@ SOURCE_CLUSTER_MASTER="$1"
 SOURCE_BUCKET_PATH="$2"
 DEST_BUCKET_PATH="$3"
 SSH_KEY="${4:-~/.ssh/id_rsa}"
+AUTO_CONFIRM=false
+
+# Check for --yes flag
+for arg in "$@"; do
+    if [ "$arg" = "--yes" ] || [ "$arg" = "-y" ]; then
+        AUTO_CONFIRM=true
+    fi
+done
 
 # Validate arguments
 if [ -z "$SOURCE_CLUSTER_MASTER" ] || [ -z "$SOURCE_BUCKET_PATH" ] || [ -z "$DEST_BUCKET_PATH" ]; then
-    echo "Usage: $0 <source_cluster_master> <source_bucket_path> <dest_bucket_path> [ssh_key]"
+    echo "Usage: $0 <source_cluster_master> <source_bucket_path> <dest_bucket_path> [ssh_key] [--yes]"
     echo ""
     echo "Arguments:"
     echo "  source_cluster_master  - EMR master node hostname or IP"
     echo "  source_bucket_path     - S3 path where HBase data currently resides"
     echo "  dest_bucket_path       - S3 path where data should be copied"
     echo "  ssh_key                - SSH key to access EMR cluster (default: ~/.ssh/id_rsa)"
+    echo "  --yes, -y              - Skip confirmation prompt"
     echo ""
     echo "Example:"
     echo "  $0 ec2-3-85-123-155.compute-1.amazonaws.com \\"
     echo "     s3://source-bucket/hbase/ \\"
     echo "     s3://dest-bucket/hbase/ \\"
-    echo "     ~/.ssh/my-key.pem"
+    echo "     ~/.ssh/my-key.pem --yes"
     exit 1
 fi
 
@@ -105,10 +114,14 @@ done
 echo ""
 
 # Confirm with user
-read -p "Do you want to proceed with copying all $TABLE_COUNT table(s)? (yes/no): " CONFIRM
-if [ "$CONFIRM" != "yes" ]; then
-    print_info "Operation cancelled by user"
-    exit 0
+if [ "$AUTO_CONFIRM" = false ]; then
+    read -p "Do you want to proceed with copying all $TABLE_COUNT table(s)? (yes/no): " CONFIRM
+    if [ "$CONFIRM" != "yes" ]; then
+        print_info "Operation cancelled by user"
+        exit 0
+    fi
+else
+    print_info "Auto-confirm enabled, proceeding with copy..."
 fi
 echo ""
 
@@ -167,15 +180,16 @@ for SNAPSHOT_NAME in "${SNAPSHOT_LIST[@]}"; do
     APP_ID=""
     for i in {1..30}; do
         APP_ID=$(ssh -i "$SSH_KEY" hadoop@"$SOURCE_CLUSTER_MASTER" \
-            "yarn application -list 2>&1 | grep ExportSnapshot | grep $SNAPSHOT_NAME | tail -1 | awk '{print \$1}'" || echo "")
+            "yarn application -list 2>&1 | grep ExportSnapshot | tail -1 | awk '{print \$1}'" || echo "")
         
-        if [ -n "$APP_ID" ]; then
+        if [ -n "$APP_ID" ] && [ "$APP_ID" != "Application-Id" ]; then
             print_info "Export job started: $APP_ID"
             break
         fi
         
         if [ $i -eq 30 ]; then
             print_error "Export job did not start for $SNAPSHOT_NAME"
+            print_error "Check log: ssh to cluster and run: cat /tmp/export-$SNAPSHOT_NAME.log"
             FAILED_EXPORTS=$((FAILED_EXPORTS + 1))
             continue 2
         fi
