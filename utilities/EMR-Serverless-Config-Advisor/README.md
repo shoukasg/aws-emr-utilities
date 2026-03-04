@@ -333,7 +333,6 @@ MAX_CONCURRENT_UPLOADS = 10  # Reduce from 20
 - Requires Spark event logs in JSON format
 - Does not analyze Spark UI or live applications
 - Recommendations based on historical patterns
-- Does not account for cost optimization (only performance)
 
 ## Contributing
 
