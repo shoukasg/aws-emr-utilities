@@ -348,7 +348,8 @@ This utility is licensed under the MIT-0 License. See the LICENSE file.
 
 ## Authors
 
-- Suthan Srinivasan - Initial development and testing
+- Suthan Phillips (suthan@amazon.com)
+- Arun Maniyan (amaniyan@amazon.com)
 
 ## Acknowledgments
 
