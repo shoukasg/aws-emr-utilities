@@ -176,7 +176,39 @@ else:
 
 ## Usage
 
-### Option 1: Dual-Mode Recommender (Recommended)
+### Option 1: Local/S3 Dual-Mode Recommender (Recommended for Local Development)
+
+Generate recommendations from local or S3 metrics files:
+
+```bash
+# Local filesystem
+python3 emr_recommender_local_s3.py \
+  --input-path /path/to/metrics/ \
+  --output-cost recommendations_cost.json \
+  --output-perf recommendations_perf.json
+
+# S3 path
+python3 emr_recommender_local_s3.py \
+  --input-path s3://YOUR_BUCKET/staging/ \
+  --output-cost recommendations_cost.json \
+  --output-perf recommendations_perf.json
+```
+
+**Features:**
+- Works with both local filesystem and S3 paths
+- No S3 credentials needed for local files
+- Generates both cost and performance recommendations
+- Optional job config format output
+
+**Parameters:**
+- `--input-path`: Local directory or S3 path (s3://bucket/prefix)
+- `--output-cost`: Output file for cost-optimized recommendations
+- `--output-perf`: Output file for performance-optimized recommendations
+- `--limit`: Max applications to process (default: 100)
+- `--target-partition-size`: Shuffle partition size in MiB (default: 1024)
+- `--format-job-config`: Generate deployment-ready job configs
+
+### Option 2: Dual-Mode Recommender (S3 Only)
 
 Generate both cost-optimized and performance-optimized recommendations:
 

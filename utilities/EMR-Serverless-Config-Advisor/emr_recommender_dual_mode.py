@@ -4,13 +4,11 @@ EMR Serverless Recommender - Dual Mode (Cost + Performance)
 Generates two sets of recommendations from the same metrics.
 """
 
-import sys
 import json
 from pathlib import Path
 
-# Import from the original module
-sys.path.insert(0, '/home/hadoop')
-from emr_recommender_v16_s3_patched import (
+# Import from the local module
+from emr_recommender import (
     EmrRecommender, _select_worker_type, _calculate_shuffle_ratio,
     _compute_exec_limits, _auto_tune_shuffles, _calculate_executor_disk,
     _max_partition_bytes, _get_timeout_configs, _get_s3_retry_configs,
