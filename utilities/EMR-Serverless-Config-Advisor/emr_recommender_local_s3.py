@@ -205,18 +205,24 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
     # Convert to DataFrame
     flattened = []
     for data in all_data:
+        # Handle both old format (io/utilization) and new format (io_summary/executor_summary)
+        app_info = data.get('application_info', {})
+        io_data = data.get('io', data.get('io_summary', {}).get('application_level', {}))
+        util_data = data.get('utilization', data.get('executor_summary', {}))
+        spill_data = data.get('spill_summary', {})
+        
         flat = {
-            'application_id': data.get('application_id'),
-            'application_name': data.get('application_name'),
-            'total_run_duration_hours': data.get('total_run_duration_hours'),
-            'io_total_input_gb': data.get('io', {}).get('total_input_gb'),
-            'io_total_shuffle_read_gb': data.get('io', {}).get('total_shuffle_read_gb'),
-            'io_total_shuffle_write_gb': data.get('io', {}).get('total_shuffle_write_gb'),
-            'avg_memory_utilization_percent': data.get('utilization', {}).get('avg_memory_utilization_percent'),
-            'avg_cpu_utilization_percent': data.get('utilization', {}).get('avg_cpu_utilization_percent'),
-            'idle_core_percentage': data.get('utilization', {}).get('idle_core_percentage'),
-            'total_memory_spilled_gb': data.get('spill_summary', {}).get('total_memory_spilled_gb'),
-            'total_disk_spilled_gb': data.get('spill_summary', {}).get('total_disk_spilled_gb'),
+            'application_id': data.get('application_id', app_info.get('app_id')),
+            'application_name': data.get('application_name', app_info.get('application_name')),
+            'total_run_duration_hours': data.get('total_run_duration_hours', app_info.get('total_run_duration_hours')),
+            'io_total_input_gb': io_data.get('total_input_gb'),
+            'io_total_shuffle_read_gb': io_data.get('total_shuffle_read_gb'),
+            'io_total_shuffle_write_gb': io_data.get('total_shuffle_write_gb'),
+            'avg_memory_utilization_percent': util_data.get('avg_memory_utilization_percent'),
+            'avg_cpu_utilization_percent': util_data.get('avg_cpu_utilization_percent'),
+            'idle_core_percentage': util_data.get('idle_core_percentage'),
+            'total_memory_spilled_gb': spill_data.get('total_memory_spilled_gb'),
+            'total_disk_spilled_gb': spill_data.get('total_disk_spilled_gb'),
         }
         flattened.append(flat)
     
