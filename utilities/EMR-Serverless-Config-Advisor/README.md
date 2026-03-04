@@ -237,11 +237,24 @@ python3 emr_recommender.py \
 
 **Example:** With 512 MiB partitions, a job with 1008 partitions becomes 2016 partitions, and executors increase from 22 to 44.
 
-### Option 2: Automated Pipeline (Original)
+### Option 2: Automated Pipeline
 
 Run the complete pipeline with a single command:
 
 ```bash
+# Local filesystem
+python3 pipeline_wrapper.py \
+  --input-path /path/to/event-logs/ \
+  --output-path /path/to/output/ \
+  --output recommendations.json
+
+# S3 paths
+python3 pipeline_wrapper.py \
+  --input-path s3://YOUR_BUCKET/event-logs/ \
+  --output-path s3://YOUR_BUCKET/staging/ \
+  --output recommendations.json
+
+# Legacy S3 format (backward compatible)
 python3 pipeline_wrapper.py \
   --input-bucket YOUR_BUCKET \
   --input-prefix event-logs/ \
