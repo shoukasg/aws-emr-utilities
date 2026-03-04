@@ -35,7 +35,7 @@ This utility processes Spark event logs to extract performance metrics and autom
 │                    PIPELINE WORKFLOW                         │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  S3 Event Logs                                              │
+│  Event Logs (S3 or Local)                                   │
 │       │                                                      │
 │       ▼                                                      │
 │  ┌──────────────────────────────────────┐                  │
@@ -43,21 +43,25 @@ This utility processes Spark event logs to extract performance metrics and autom
 │  │  - Discover & group event logs       │                  │
 │  │  - Extract 18 metrics per app        │                  │
 │  │  - Parallel processing (20 workers)  │                  │
-│  │  - Output: JSON metrics to S3        │                  │
+│  │  - Output: JSON metrics (S3/Local)   │                  │
 │  └──────────────────────────────────────┘                  │
 │       │                                                      │
 │       ▼                                                      │
 │  ┌──────────────────────────────────────┐                  │
 │  │  STAGE 2: emr_recommender.py         │                  │
-│  │  - Load metrics from S3              │                  │
+│  │  - Load metrics (S3 or Local)        │                  │
+│  │  - Dual-mode optimization            │                  │
 │  │  - Calculate worker requirements     │                  │
 │  │  - Optimize shuffle partitions       │                  │
 │  │  - Generate Spark configs            │                  │
-│  │  - Output: JSON + CSV                │                  │
+│  │  - Output: Cost + Perf JSON          │                  │
 │  └──────────────────────────────────────┘                  │
 │       │                                                      │
 │       ▼                                                      │
 │  EMR Serverless Recommendations                             │
+│  - Cost-optimized configs                                   │
+│  - Performance-optimized configs                            │
+│  - Optional: Job config format                              │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
