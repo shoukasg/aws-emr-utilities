@@ -15,7 +15,10 @@ This utility processes Spark event logs to extract performance metrics and autom
 
 - **Automated Pipeline**: End-to-end processing from event logs to recommendations
 - **Dual Optimization Modes**: Cost-optimized vs Performance-optimized configurations
-- **Parallel Processing**: Multi-threaded extraction with configurable workers
+- **Selective Output**: Generate only cost or performance recommendations
+- **Individual Files**: Create separate JSON per job with numbered naming (1-jobname.json)
+- **Time-Based Filtering**: Process only recent logs (last 1h, 24h, 1 week, etc.)
+- **Parallel Processing**: Multi-threaded extraction with 20 workers
 - **S3 Integration**: Direct S3 read/write with streaming decompression
 - **Rolling Log Support**: Handles both single and rolling event logs
 - **Configurable Partition Size**: Adjust shuffle parallelism (default: 1GB)
@@ -323,6 +326,363 @@ python3 pipeline_wrapper.py \
 - `recommendations_cost_job_config.json`: Deployment-ready cost configs (if --format-job-config)
 - `recommendations_perf_job_config.json`: Deployment-ready perf configs (if --format-job-config)
 - Metrics directory: Intermediate JSON metrics (task_stage_summary/, spark_config_extract/)
+
+---
+
+## Feature Guide
+
+### 1. Time-Based Filtering
+
+Process only recent event logs based on file modification timestamp.
+
+**Use Cases:**
+- Daily optimization runs (last 24 hours)
+- Real-time monitoring (last 1-2 hours)
+- Weekly reviews (last 7 days)
+- Incremental processing
+
+**Usage:**
+
+```bash
+# Process only last 24 hours
+python3 spark_processor.py --last-hours 24
+
+# Pipeline with time filter
+python3 pipeline_wrapper.py \
+  --input-path s3://bucket/event-logs/ \
+  --output-path s3://bucket/staging/ \
+  --last-hours 24 \
+  --output daily_recommendations.json
+
+# Last week's logs
+python3 pipeline_wrapper.py \
+  --input-path s3://bucket/event-logs/ \
+  --last-hours 168
+```
+
+**Time Filter Reference:**
+
+| Hours | Duration | Command Example |
+|-------|----------|-----------------|
+| 1 | Last hour | `--last-hours 1` |
+| 2 | Last 2 hours | `--last-hours 2` |
+| 24 | Last day | `--last-hours 24` |
+| 168 | Last week | `--last-hours 168` |
+| 720 | Last month | `--last-hours 720` |
+
+**How it works:**
+- S3: Filters by `LastModified` timestamp
+- Local: Filters by file modification time (mtime)
+- Timezone: UTC-aware comparison
+
+---
+
+### 2. Selective Output Generation
+
+Generate only cost-optimized OR performance-optimized recommendations.
+
+**Use Cases:**
+- Budget-focused optimization (cost only)
+- Performance-critical workloads (performance only)
+- Faster processing (skip unwanted mode)
+- Targeted analysis
+
+**Usage:**
+
+```bash
+# Cost-optimized only
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-cost cost_recommendations.json \
+  --cost-optimized
+
+# Performance-optimized only
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-perf perf_recommendations.json \
+  --performance-optimized
+
+# Both modes (default behavior)
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-cost cost_recs.json \
+  --output-perf perf_recs.json
+```
+
+**With Pipeline:**
+
+```bash
+# Cost-only pipeline
+python3 pipeline_wrapper.py \
+  --input-path s3://bucket/logs/ \
+  --output-path s3://bucket/staging/ \
+  --output recommendations.json \
+  --cost-optimized
+```
+
+---
+
+### 3. Individual Files Output
+
+Generate separate JSON file per job instead of single file with all jobs.
+
+**Use Cases:**
+- Deploy individual job configurations
+- Version control per job
+- Selective job updates
+- Easier file management
+
+**Usage:**
+
+```bash
+# Individual files with standard format
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-cost /output/dir/cost.json \
+  --individual-files
+
+# Individual job config files (deployment-ready)
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-cost /output/dir/cost.json \
+  --format-job-config \
+  --individual-files
+```
+
+**Output Format:**
+```
+/output/dir/
+├── 1-job-name-1.json
+├── 2-job-name-2.json
+├── 3-job-name-3.json
+└── ...
+```
+
+**File Naming:**
+- Pattern: `{number}-{job-name}.json`
+- Number: Sequential (1, 2, 3, ...)
+- Job name: Sanitized (spaces → underscores, special chars removed)
+
+**Example:**
+```bash
+# Generate individual cost-optimized job configs
+python3 emr_recommender.py \
+  --input-path ~/metrics/ \
+  --output-cost /tmp/configs/cost.json \
+  --cost-optimized \
+  --format-job-config \
+  --individual-files
+
+# Output:
+# /tmp/configs/1-DedupTripEvents.json
+# /tmp/configs/2-UserAttributeStore.json
+# /tmp/configs/3-SegmentEvaluation.json
+```
+
+---
+
+### 4. Job Config Format
+
+Generate deployment-ready job configuration format instead of standard recommendation format.
+
+**Use Cases:**
+- Direct deployment to EMR Serverless
+- CI/CD pipeline integration
+- Infrastructure as Code
+- Automated job updates
+
+**Usage:**
+
+```bash
+# Job config format (single file)
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-cost cost_configs.json \
+  --format-job-config
+
+# Job config format (individual files)
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-cost /configs/cost.json \
+  --format-job-config \
+  --individual-files
+```
+
+**Output Structure:**
+```json
+{
+  "job_name": "my-spark-job",
+  "configuration": {
+    "config_name": "my-spark-job-config",
+    "type": "spark",
+    "compute_platform": "EMR_SERVERLESS",
+    "spark_conf": {
+      "spark.driver.cores": "8",
+      "spark.driver.memory": "54G",
+      "spark.executor.cores": "16",
+      "spark.executor.memory": "108g",
+      "spark.executor.instances": "10",
+      "spark.dynamicAllocation.enabled": "true",
+      "spark.dynamicAllocation.minExecutors": "1",
+      "spark.dynamicAllocation.maxExecutors": "10"
+    }
+  }
+}
+```
+
+---
+
+### 5. Feature Combinations
+
+Combine multiple features for powerful workflows.
+
+**Example 1: Daily Cost-Optimized Configs**
+```bash
+# Process last 24 hours, generate individual cost-optimized job configs
+python3 pipeline_wrapper.py \
+  --input-path s3://bucket/event-logs/ \
+  --output-path s3://bucket/staging/ \
+  --output daily_configs.json \
+  --last-hours 24 \
+  --cost-optimized \
+  --format-job-config \
+  --individual-files
+```
+
+**Example 2: Weekly Performance Review**
+```bash
+# Process last week, performance-optimized only
+python3 pipeline_wrapper.py \
+  --input-path s3://bucket/event-logs/ \
+  --output-path s3://bucket/staging/ \
+  --output weekly_perf.json \
+  --last-hours 168 \
+  --performance-optimized \
+  --limit 50
+```
+
+**Example 3: Production Deployment Pipeline**
+```bash
+# Generate deployment-ready configs for top 20 jobs
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --output-cost /deploy/configs/cost.json \
+  --cost-optimized \
+  --format-job-config \
+  --individual-files \
+  --limit 20
+```
+
+---
+
+### 6. Custom Partition Sizing
+
+Adjust shuffle partition size for different workload characteristics.
+
+**Usage:**
+
+```bash
+# Smaller partitions = more parallelism
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --target-partition-size 512 \
+  --output-cost cost_recs.json
+
+# Larger partitions = fewer executors
+python3 emr_recommender.py \
+  --input-path s3://bucket/metrics/ \
+  --target-partition-size 2048 \
+  --output-cost cost_recs.json
+```
+
+**Partition Size Impact:**
+
+| Size (MiB) | Effect | Use Case |
+|------------|--------|----------|
+| 256 | 4x partitions, 4x executors | Extreme parallelism |
+| 512 | 2x partitions, 2x executors | Shuffle-heavy workloads |
+| 1024 | Default (1 GB per partition) | Balanced (recommended) |
+| 2048 | Fewer partitions, fewer executors | Large data, less parallelism |
+
+---
+
+## Complete Examples
+
+### Example 1: Daily Production Optimization
+
+```bash
+#!/bin/bash
+# Daily job: Process last 24 hours, generate deployment configs
+
+python3 pipeline_wrapper.py \
+  --input-path s3://prod-logs/spark-events/ \
+  --output-path s3://prod-logs/metrics/ \
+  --output daily_recommendations.json \
+  --last-hours 24 \
+  --cost-optimized \
+  --format-job-config \
+  --individual-files \
+  --limit 50 \
+  --region us-east-1
+
+# Output: Individual job configs in current directory
+# 1-job1.json, 2-job2.json, etc.
+```
+
+### Example 2: Weekly Performance Review
+
+```bash
+#!/bin/bash
+# Weekly review: Analyze last 7 days, both optimization modes
+
+python3 pipeline_wrapper.py \
+  --input-path s3://analytics-logs/events/ \
+  --output-path s3://analytics-logs/weekly-metrics/ \
+  --output weekly_report.json \
+  --last-hours 168 \
+  --limit 100 \
+  --target-partition-size 1024 \
+  --region us-west-2
+
+# Output: 
+# weekly_report_cost.json
+# weekly_report_perf.json
+```
+
+### Example 3: Local Development Testing
+
+```bash
+# Test with local event logs
+python3 spark_processor.py --last-hours 24
+
+python3 emr_recommender.py \
+  --input-path ~/test_output/ \
+  --output-cost /tmp/test_cost.json \
+  --output-perf /tmp/test_perf.json \
+  --limit 10
+```
+
+---
+
+## Performance Benchmarks
+
+### Large-Scale Test (EMR Cluster)
+- **Input:** 5,887 event logs, 62 applications
+- **Processing Time:** 12 minutes 25 seconds
+- **Workers:** 20 parallel processes
+- **Throughput:** ~474 files/minute
+- **Output:** S3 (concurrent uploads)
+
+### Small-Scale Test (Single App)
+- **Input:** 1 event log, 1 application
+- **Processing Time:** 62.9 seconds
+- **Breakdown:** 61.4s extraction + 1.5s recommendations
+
+### Time Filter Impact
+- **Without filter:** 5,887 files processed
+- **With --last-hours 24:** Only recent files (significant reduction)
+
+---
 
 ### Option 3: Manual Two-Stage Process
 
