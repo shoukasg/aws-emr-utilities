@@ -41,8 +41,8 @@ except ImportError:
 
 
 # Configuration (can be overridden via command-line or environment)
-INPUT_PATH = "/Users/suthan/Downloads/eventlog_v2_00g3h5dbt06ip80b/"  # or local: "/path/to/logs/"
-OUTPUT_PATH = "/Users/suthan/test_pipeline_full/"  # or local: "/path/to/output/"
+INPUT_PATH = "/Users/suthan/Downloads/"  # or local: "/path/to/logs/"
+OUTPUT_PATH = "/Users/suthan/test_app_processing/"  # or local: "/path/to/output/"
 AWS_PROFILE = None
 MAX_WORKERS = 20
 WRITE_WORKERS = 20
@@ -172,30 +172,48 @@ def get_s3_client(profile=None):
     return session.client('s3', region_name='us-east-1')
 
 
-def list_files(path: str, profile=None) -> List[str]:
+def list_files(path: str, profile=None, hours_filter=None) -> List[str]:
     """List files from S3 or local filesystem."""
     if is_s3_path(path):
         bucket, prefix = path.replace('s3://', '').split('/', 1)
-        return list_s3_files(bucket, prefix, profile)
+        return list_s3_files(bucket, prefix, profile, hours_filter)
     else:
         # Local filesystem
         import glob
+        from datetime import datetime, timedelta, timezone
         pattern = f"{path}/**/*"
         all_files = glob.glob(pattern, recursive=True)
-        # Filter out directories
-        return [f for f in all_files if os.path.isfile(f)]
+        files = [f for f in all_files if os.path.isfile(f)]
+        
+        if hours_filter:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_filter)
+            filtered = []
+            for f in files:
+                mtime = datetime.fromtimestamp(os.path.getmtime(f), tz=timezone.utc)
+                if mtime >= cutoff_time:
+                    filtered.append(f)
+            return filtered
+        return files
 
 
-def list_s3_files(bucket: str, prefix: str, profile=None) -> List[str]:
+def list_s3_files(bucket: str, prefix: str, profile=None, hours_filter=None) -> List[str]:
     s3_client = get_s3_client(profile)
     files = []
     paginator = s3_client.get_paginator('list_objects_v2')
     pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+    
+    cutoff_time = None
+    if hours_filter:
+        from datetime import datetime, timedelta, timezone
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_filter)
+    
     for page in pages:
         if 'Contents' in page:
             for obj in page['Contents']:
                 key = obj['Key']
                 if not key.endswith('/'):
+                    if cutoff_time and obj['LastModified'] < cutoff_time:
+                        continue
                     files.append(key)
     return files
 
@@ -4149,12 +4167,21 @@ def write_results_to_s3(bucket: str, prefix: str, log_name: str,
 
 # Main execution
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Process Spark event logs')
+    parser.add_argument('--last-hours', type=int, help='Process only logs modified in last N hours (1, 2, 24, 168 for 1 week, etc.)')
+    args = parser.parse_args()
+    
     print(f"\n{'='*80}")
     print("REDUCED MULTI-THREADED SPARK EVENT LOG PROCESSOR")
     print(f"{'='*80}\n")
     
+    if args.last_hours:
+        print(f"Time filter: Last {args.last_hours} hours")
+    
     print(f"Scanning: {INPUT_PATH}")
-    files = list_files(INPUT_PATH, AWS_PROFILE)
+    files = list_files(INPUT_PATH, AWS_PROFILE, args.last_hours)
 
     print(f"\nFound {len(files)} files")
     print("\nSample files:")

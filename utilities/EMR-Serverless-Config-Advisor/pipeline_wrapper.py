@@ -159,9 +159,29 @@ def main():
         help="Target shuffle partition size in MiB (default: 1024)"
     )
     parser.add_argument(
+        "--last-hours",
+        type=int,
+        help="Process only event logs modified in last N hours (1, 2, 24, 168 for 1 week, etc.)"
+    )
+    parser.add_argument(
         "--format-job-config",
         action="store_true",
         help="Format output to job configuration format"
+    )
+    parser.add_argument(
+        "--cost-optimized",
+        action="store_true",
+        help="Generate only cost-optimized recommendations"
+    )
+    parser.add_argument(
+        "--performance-optimized",
+        action="store_true",
+        help="Generate only performance-optimized recommendations"
+    )
+    parser.add_argument(
+        "--individual-files",
+        action="store_true",
+        help="Generate individual JSON files per job (1-jobname.json, 2-jobname.json, ...)"
     )
     parser.add_argument(
         "--skip-extraction",
@@ -207,6 +227,8 @@ def main():
         
         # Run spark processor
         cmd = ["python3", SPARK_PROCESSOR_SCRIPT]
+        if args.last_hours:
+            cmd.extend(["--last-hours", str(args.last_hours)])
         if not run_command(cmd, "Metric Extraction"):
             print("\n✗ Pipeline failed: Metric extraction failed")
             sys.exit(1)
@@ -233,6 +255,15 @@ def main():
     
     if args.format_job_config:
         cmd.append("--format-job-config")
+    
+    if args.cost_optimized:
+        cmd.append("--cost-optimized")
+    
+    if args.performance_optimized:
+        cmd.append("--performance-optimized")
+    
+    if args.individual_files:
+        cmd.append("--individual-files")
     
     if not run_command(cmd, "Recommendation Generation"):
         print("\n✗ Pipeline failed: Recommendation generation failed")
