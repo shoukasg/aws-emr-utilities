@@ -227,15 +227,18 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         flattened.append(flat)
     
     df = pd.DataFrame(flattened)
-    df = df[df['io_total_input_gb'] > 0]
-    df = df.sort_values('io_total_input_gb', ascending=False).head(limit)
     
-    log.info("Processing %d applications", len(df))
+    # Separate apps with and without input data
+    df_with_data = df[df['io_total_input_gb'] > 0].sort_values('io_total_input_gb', ascending=False).head(limit)
+    df_no_data = df[df['io_total_input_gb'] == 0].head(limit)
+    
+    log.info("Processing %d applications with data, %d with no input data", len(df_with_data), len(df_no_data))
     
     cost_recs = []
     perf_recs = []
     
-    for _, row in df.iterrows():
+    # Process applications with input data
+    for _, row in df_with_data.iterrows():
         app_id = row.get('application_id', 'N/A')
         name = row.get('application_name', 'N/A')
         duration = float(row.get('total_run_duration_hours', 0) or 0)
@@ -373,6 +376,48 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         
         cost_recs.append(cost_rec)
         perf_recs.append(perf_rec)
+    
+    # Process applications with no input data - recommend minimal config
+    for _, row in df_no_data.iterrows():
+        app_id = row.get('application_id', 'N/A')
+        name = row.get('application_name', 'N/A')
+        
+        minimal_rec = {
+            "application_id": app_id,
+            "application_name": name,
+            "optimization_mode": "minimal",
+            "note": "No input data detected - minimal configuration recommended",
+            "metrics": {
+                "input_gb": 0.0,
+                "duration_hours": 0.0,
+            },
+            "worker": {
+                "type": "Small",
+                "vcpu": 1,
+                "memory_gb": 2,
+                "max_executors": 2,
+                "min_executors": 1,
+                "total_vcpu_capacity": 2,
+                "total_memory_capacity": 4
+            },
+            "spark_configs": {
+                "spark.driver.cores": "1",
+                "spark.driver.memory": "2G",
+                "spark.executor.cores": "1",
+                "spark.executor.memory": "2g",
+                "spark.dynamicAllocation.enabled": "true",
+                "spark.dynamicAllocation.maxExecutors": "2",
+                "spark.dynamicAllocation.minExecutors": "1",
+                "spark.dynamicAllocation.initialExecutors": "1",
+                "spark.hadoop.fs.s3a.connection.ssl.enabled": "true",
+                "spark.sql.catalog.spark_catalog": "org.apache.iceberg.spark.SparkSessionCatalog",
+                "spark.sql.catalog.spark_catalog.type": "hive",
+                "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+            }
+        }
+        
+        cost_recs.append(minimal_rec)
+        perf_recs.append(minimal_rec)
     
     log.info("Generated %d cost-optimized and %d performance-optimized recommendations",
              len(cost_recs), len(perf_recs))
