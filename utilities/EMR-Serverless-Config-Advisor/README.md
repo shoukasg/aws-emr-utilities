@@ -266,14 +266,20 @@ python3 pipeline_wrapper.py \
   --target-partition-size 1024 \
   --format-job-config
 
-# S3 paths
+# S3 paths with time filter (last 24 hours)
 python3 pipeline_wrapper.py \
   --input-path s3://YOUR_BUCKET/event-logs/ \
   --output-path s3://YOUR_BUCKET/staging/ \
   --output recommendations.json \
-  --limit 10 \
-  --target-partition-size 1024 \
-  --format-job-config
+  --last-hours 24 \
+  --limit 10
+
+# Process only last week's logs
+python3 pipeline_wrapper.py \
+  --input-path s3://YOUR_BUCKET/event-logs/ \
+  --output-path s3://YOUR_BUCKET/staging/ \
+  --output recommendations.json \
+  --last-hours 168
 
 # Legacy S3 format (backward compatible)
 python3 pipeline_wrapper.py \
@@ -288,6 +294,17 @@ python3 pipeline_wrapper.py \
 - `--input-path`: Local directory or S3 path (s3://bucket/prefix)
 - `--output-path`: Local directory or S3 path for metrics output
 - `--output`: Local filename for recommendations (JSON)
+- `--last-hours`: Process only logs modified in last N hours (1, 2, 24, 168 for 1 week, etc.)
+
+**Time Filter Quick Reference:**
+
+| Hours | Duration | Use Case |
+|-------|----------|----------|
+| 1 | Last hour | Real-time monitoring |
+| 2 | Last 2 hours | Recent job analysis |
+| 24 | Last day | Daily optimization |
+| 168 | Last week | Weekly review |
+| 720 | Last month | Monthly analysis |
 - `--limit`: Maximum number of applications to process (default: 100)
 - `--target-partition-size`: Shuffle partition size in MiB (default: 1024)
 - `--format-job-config`: Generate deployment-ready job configs

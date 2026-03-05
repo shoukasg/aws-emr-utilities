@@ -159,6 +159,11 @@ def main():
         help="Target shuffle partition size in MiB (default: 1024)"
     )
     parser.add_argument(
+        "--last-hours",
+        type=int,
+        help="Process only event logs modified in last N hours (1, 2, 24, 168 for 1 week, etc.)"
+    )
+    parser.add_argument(
         "--format-job-config",
         action="store_true",
         help="Format output to job configuration format"
@@ -222,6 +227,8 @@ def main():
         
         # Run spark processor
         cmd = ["python3", SPARK_PROCESSOR_SCRIPT]
+        if args.last_hours:
+            cmd.extend(["--last-hours", str(args.last_hours)])
         if not run_command(cmd, "Metric Extraction"):
             print("\n✗ Pipeline failed: Metric extraction failed")
             sys.exit(1)
