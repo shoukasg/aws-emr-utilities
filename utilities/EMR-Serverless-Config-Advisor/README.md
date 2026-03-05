@@ -212,21 +212,32 @@ python3 emr_recommender.py \
 - `--limit`: Max applications to process (default: 100)
 - `--target-partition-size`: Shuffle partition size in MiB (default: 1024)
 - `--format-job-config`: Generate deployment-ready job configs
+- `--cost-optimized`: Generate only cost-optimized recommendations
+- `--performance-optimized`: Generate only performance-optimized recommendations
+- `--individual-files`: Generate separate JSON per job (1-jobname.json, 2-jobname.json, ...)
 - `--region`: AWS region (only for S3 paths)
 
 **Advanced Options:**
 
 ```bash
+# Generate only cost-optimized recommendations
+python3 emr_recommender.py \
+  --input-path s3://YOUR_BUCKET/staging/ \
+  --output-cost recommendations_cost.json \
+  --cost-optimized
+
+# Generate individual job config files (1-jobname.json, 2-jobname.json, ...)
+python3 emr_recommender.py \
+  --input-path s3://YOUR_BUCKET/staging/ \
+  --output-cost /output/dir/cost.json \
+  --cost-optimized \
+  --format-job-config \
+  --individual-files
+
 # Custom partition size (smaller = more parallelism)
 python3 emr_recommender.py \
   --input-path s3://YOUR_BUCKET/staging/ \
   --target-partition-size 512 \
-  --limit 100
-
-# Generate deployment-ready job configs
-python3 emr_recommender.py \
-  --input-path s3://YOUR_BUCKET/staging/ \
-  --format-job-config \
   --limit 100
 ```
 
