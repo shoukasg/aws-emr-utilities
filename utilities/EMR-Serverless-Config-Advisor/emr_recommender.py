@@ -214,6 +214,7 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         flat = {
             'application_id': data.get('application_id', app_info.get('app_id')),
             'application_name': data.get('application_name', app_info.get('application_name')),
+            'job_id': app_info.get('job_id'),
             'total_run_duration_hours': data.get('total_run_duration_hours', app_info.get('total_run_duration_hours')),
             'io_total_input_gb': io_data.get('total_input_gb'),
             'io_total_shuffle_read_gb': io_data.get('total_shuffle_read_gb'),
@@ -241,6 +242,7 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
     for _, row in df_with_data.iterrows():
         app_id = row.get('application_id', 'N/A')
         name = row.get('application_name', 'N/A')
+        job_id = row.get('job_id')
         duration = float(row.get('total_run_duration_hours', 0) or 0)
         i_in_gb = float(row.get('io_total_input_gb', 0) or 0)
         s_in_gb = float(row.get('io_total_shuffle_read_gb', 0) or 0)
@@ -335,6 +337,10 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
             "application_name": name,
             "optimization_mode": "cost",
             "metrics": base_metrics,
+        }
+        if job_id:
+            cost_rec["job_id"] = job_id
+        cost_rec.update({
             "worker": {
                 "type": worker_type,
                 "vcpu": worker_cfg["vcpu"],
@@ -350,7 +356,7 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
                 "target_partition_size_mib": target_mib_cost,
                 "auto_tuned": True,
             },
-        }
+        })
         
         # Performance recommendation
         perf_rec = {
@@ -358,6 +364,10 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
             "application_name": name,
             "optimization_mode": "performance",
             "metrics": base_metrics,
+        }
+        if job_id:
+            perf_rec["job_id"] = job_id
+        perf_rec.update({
             "worker": {
                 "type": worker_type,
                 "vcpu": worker_cfg["vcpu"],
@@ -373,7 +383,7 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
                 "target_partition_size_mib": target_mib_perf,
                 "auto_tuned": True,
             },
-        }
+        })
         
         cost_recs.append(cost_rec)
         perf_recs.append(perf_rec)
