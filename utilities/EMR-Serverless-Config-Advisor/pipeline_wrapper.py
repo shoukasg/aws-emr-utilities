@@ -184,6 +184,10 @@ def main():
         help="Generate individual JSON files per job (1-jobname.json, 2-jobname.json, ...)"
     )
     parser.add_argument(
+        "--write-to-iceberg-table",
+        help="Write recommendations to Iceberg table (catalog.database.table)"
+    )
+    parser.add_argument(
         "--skip-extraction",
         action="store_true",
         help="Skip extraction step (use existing staging data)"
@@ -264,6 +268,9 @@ def main():
     
     if args.individual_files:
         cmd.append("--individual-files")
+    
+    if args.write_to_iceberg_table:
+        cmd.extend(["--write-to-iceberg-table", args.write_to_iceberg_table])
     
     if not run_command(cmd, "Recommendation Generation"):
         print("\n✗ Pipeline failed: Recommendation generation failed")

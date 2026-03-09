@@ -455,6 +455,8 @@ if __name__ == "__main__":
                         help="Generate only performance-optimized recommendations")
     parser.add_argument("--individual-files", action="store_true",
                         help="Generate individual JSON files per job (1-jobname.json, 2-jobname.json, ...)")
+    parser.add_argument("--write-to-iceberg-table",
+                        help="Write recommendations to Iceberg table (catalog.database.table)")
     
     args = parser.parse_args()
     
@@ -517,6 +519,16 @@ if __name__ == "__main__":
         else:
             Path(args.output_perf).write_text(json.dumps(perf_recs, indent=2))
             log.info("Performance-optimized recommendations written to %s", args.output_perf)
+    
+    # Write to Iceberg table if requested
+    if args.write_to_iceberg_table:
+        from write_to_iceberg import write_to_iceberg
+        recs_to_write = []
+        if generate_cost:
+            recs_to_write.extend(cost_recs)
+        if generate_perf:
+            recs_to_write.extend(perf_recs)
+        write_to_iceberg(recs_to_write, args.write_to_iceberg_table, args.region)
     
     # Print comparison (only if both modes generated)
     if generate_cost and generate_perf:
