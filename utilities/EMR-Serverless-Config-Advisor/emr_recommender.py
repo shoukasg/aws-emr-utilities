@@ -161,6 +161,9 @@ def _max_partition_bytes(input_gb: float) -> str:
 
 
 def _get_timeout_configs(input_gb: float, duration_hours: float) -> Dict[str, str]:
+    import math
+    if math.isnan(input_gb): input_gb = 0
+    if math.isnan(duration_hours): duration_hours = 0
     base_timeout = 600
     data_factor = int(input_gb / 1000) * 60
     duration_factor = int(duration_hours) * 120 if duration_hours else 0
@@ -228,6 +231,9 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         flattened.append(flat)
     
     df = pd.DataFrame(flattened)
+    
+    # Sanitize NaN values - replace with 0 for numeric columns
+    df = df.fillna(0)
     
     # Separate apps with and without input data
     df_with_data = df[df['io_total_input_gb'] > 0].sort_values('io_total_input_gb', ascending=False).head(limit)

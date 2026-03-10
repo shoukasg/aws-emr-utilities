@@ -1,37 +1,28 @@
 #!/usr/bin/env python3
 """
 Spark Config Advisor MCP Server
-Submits analysis jobs to AWS Batch and returns recommendations.
+Runs analysis on a remote EC2 instance via SSH and returns recommendations.
 """
 
 import json
+import subprocess
 import time
-import boto3
 from mcp.server.fastmcp import FastMCP
 
-REGION = "us-east-1"
-JOB_QUEUE = "spark-advisor-queue"
-JOB_DEFINITION = "spark-config-advisor"
-OUTPUT_BUCKET = "suthan-event-logs"
-RESULTS_PREFIX = "mcp-results"
+EC2_HOST = "hadoop@ec2-3-91-248-12.compute-1.amazonaws.com"
+SSH_KEY = "~/suthan-bda.pem"
+SSH_CMD = f"ssh -i {SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10 {EC2_HOST}"
 
 mcp = FastMCP("spark-config-advisor")
 
 
-def _get_clients():
-    return boto3.client("batch", region_name=REGION), boto3.client("s3", region_name=REGION)
-
-
-def _wait_for_job(batch, job_id, timeout=3600):
-    """Poll Batch job until terminal state."""
-    start = time.time()
-    while time.time() - start < timeout:
-        job = batch.describe_jobs(jobs=[job_id])["jobs"][0]
-        status = job["status"]
-        if status in ("SUCCEEDED", "FAILED"):
-            return job
-        time.sleep(15)
-    return {"status": "TIMEOUT", "jobId": job_id}
+def _ssh(cmd, timeout=900):
+    """Run command on EC2 via SSH."""
+    result = subprocess.run(
+        f'{SSH_CMD} \'{cmd}\'',
+        shell=True, capture_output=True, text=True, timeout=timeout
+    )
+    return result.stdout, result.stderr, result.returncode
 
 
 @mcp.tool()
@@ -42,7 +33,7 @@ def analyze_spark_logs(
 ) -> str:
     """Analyze Spark event logs from S3 and generate EMR Serverless configuration recommendations.
 
-    Runs a high-memory AWS Batch job (256 GB RAM) to process Spark event logs
+    Runs on a high-memory EC2 instance (747 GB RAM) to process Spark event logs
     and produce optimized worker sizing, executor counts, and Spark configs.
 
     Args:
@@ -53,8 +44,6 @@ def analyze_spark_logs(
     Returns:
         JSON with recommendations per application including worker type, executor counts, and full Spark configs.
     """
-    batch, s3 = _get_clients()
-
     if not input_path.startswith("s3://"):
         return json.dumps({"error": "input_path must be an S3 path (s3://bucket/prefix/)"})
 
@@ -63,19 +52,12 @@ def analyze_spark_logs(
     input_prefix = parts[1] if len(parts) > 1 else ""
 
     run_id = str(int(time.time()))
-    staging_prefix = f"{RESULTS_PREFIX}/{run_id}/staging/"
+    staging_prefix = f"mcp-staging/{run_id}/"
     output_file = f"/tmp/recs_{run_id}.json"
 
-    # The pipeline writes local files. We add a post-processing step in the
-    # container command to upload results to S3.
-    cost_file = output_file.replace(".json", "_cost.json")
-    perf_file = output_file.replace(".json", "_perf.json")
-    s3_cost_key = f"{RESULTS_PREFIX}/{run_id}/recommendations_cost.json"
-    s3_perf_key = f"{RESULTS_PREFIX}/{run_id}/recommendations_perf.json"
-
-    # Build shell command: run pipeline then upload results to S3
+    # Build pipeline command
     pipeline_cmd = (
-        f"python3 pipeline_wrapper.py"
+        f"cd ~ && python3 pipeline_wrapper.py"
         f" --input-bucket {input_bucket}"
         f" --input-prefix {input_prefix}"
         f" --staging-prefix {staging_prefix}"
@@ -87,66 +69,34 @@ def analyze_spark_logs(
     elif mode == "performance-optimized":
         pipeline_cmd += " --performance-optimized"
 
-    upload_cmd = (
-        f"aws s3 cp {cost_file} s3://{OUTPUT_BUCKET}/{s3_cost_key} 2>/dev/null;"
-        f" aws s3 cp {perf_file} s3://{OUTPUT_BUCKET}/{s3_perf_key} 2>/dev/null"
-    )
+    # Run pipeline
+    stdout, stderr, rc = _ssh(pipeline_cmd)
 
-    full_cmd = f"{pipeline_cmd} && {upload_cmd}"
+    if rc != 0:
+        return json.dumps({"error": f"Pipeline failed (exit {rc})", "stderr": stderr[-2000:], "stdout": stdout[-2000:]})
 
-    response = batch.submit_job(
-        jobName=f"spark-advisor-{run_id}",
-        jobQueue=JOB_QUEUE,
-        jobDefinition=JOB_DEFINITION,
-        containerOverrides={
-            "command": ["bash", "-c", full_cmd],
-        },
-    )
-    job_id = response["jobId"]
+    # Read results
+    cost_file = output_file.replace(".json", "_cost.json")
+    perf_file = output_file.replace(".json", "_perf.json")
+    target = cost_file if mode == "cost-optimized" else perf_file
 
-    # Poll for completion
-    job = _wait_for_job(batch, job_id)
+    out, err, rc = _ssh(f"cat {target}")
+    if rc != 0:
+        # Try the other file
+        out, err, rc = _ssh(f"cat {cost_file} 2>/dev/null || cat {perf_file}")
 
-    if job["status"] != "SUCCEEDED":
-        reason = job.get("statusReason", "unknown")
-        return json.dumps({"error": f"Job {job['status']}: {reason}", "job_id": job_id})
+    if rc != 0:
+        return json.dumps({"error": "Could not read results", "stderr": err})
 
-    # Fetch results
-    target_key = s3_cost_key if mode == "cost-optimized" else s3_perf_key
     try:
-        obj = s3.get_object(Bucket=OUTPUT_BUCKET, Key=target_key)
-        results = json.loads(obj["Body"].read().decode("utf-8"))
+        results = json.loads(out)
         return json.dumps({
-            "job_id": job_id,
             "mode": mode,
             "application_count": len(results),
             "recommendations": results,
         }, indent=2)
-    except Exception as e:
-        return json.dumps({"error": f"Failed to fetch results: {str(e)}", "job_id": job_id})
-
-
-@mcp.tool()
-def get_job_status(job_id: str) -> str:
-    """Check the status of a Spark Config Advisor batch job.
-
-    Args:
-        job_id: AWS Batch job ID.
-
-    Returns:
-        Job status and timing details.
-    """
-    batch, _ = _get_clients()
-    job = batch.describe_jobs(jobs=[job_id])["jobs"][0]
-    result = {
-        "job_id": job_id,
-        "status": job["status"],
-        "status_reason": job.get("statusReason", ""),
-    }
-    for field in ("createdAt", "startedAt", "stoppedAt"):
-        if field in job:
-            result[field] = str(job[field])
-    return json.dumps(result, indent=2)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON in results", "raw": out[:2000]})
 
 
 @mcp.tool()
@@ -160,13 +110,11 @@ def list_event_log_prefixes(bucket: str = "suthan-event-logs", prefix: str = "")
     Returns:
         List of application prefixes found.
     """
-    _, s3 = _get_clients()
-    paginator = s3.get_paginator("list_objects_v2")
-    prefixes = set()
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
-        for cp in page.get("CommonPrefixes", []):
-            prefixes.add(cp["Prefix"])
-    return json.dumps(sorted(prefixes), indent=2)
+    out, _, rc = _ssh(f"aws s3 ls s3://{bucket}/{prefix} --region us-east-1")
+    if rc != 0:
+        return json.dumps({"error": "Failed to list S3"})
+    prefixes = [line.strip().split()[-1] for line in out.strip().split("\n") if line.strip().startswith("PRE")]
+    return json.dumps(prefixes, indent=2)
 
 
 if __name__ == "__main__":
