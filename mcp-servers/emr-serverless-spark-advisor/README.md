@@ -6,7 +6,7 @@
 
 > **🤖 Connect AI agents to EMR Serverless for intelligent Spark configuration recommendations, job analysis, and performance optimization**
 
-An MCP (Model Context Protocol) server that analyzes Apache Spark event logs from Amazon EMR Serverless and **generates optimized EMR Serverless Spark configurations** — right-sized worker types, executor counts, memory, and shuffle partitions. Also provides bottleneck detection, comparative analysis, and stage-level diagnostics. Works with any MCP-compatible client including [Kiro](https://kiro.dev), Claude Desktop, Amazon Q CLI, and LangGraph agents.
+An MCP (Model Context Protocol) server that analyzes Apache Spark event logs and **generates optimized EMR Serverless Spark configurations** — right-sized worker types, executor counts, memory, and shuffle partitions. Also provides bottleneck detection, comparative analysis, and stage-level diagnostics. Works with any MCP-compatible client including [Kiro](https://kiro.dev), Claude Desktop, Amazon Q CLI, and LangGraph agents.
 
 ## 🎯 What is This?
 
