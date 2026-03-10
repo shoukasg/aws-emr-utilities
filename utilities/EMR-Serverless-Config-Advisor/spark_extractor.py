@@ -101,6 +101,7 @@ def phase_a_decompress(input_path, local_base, limit, workers=50):
     start = time.time()
 
     # Flat parallelism — all files across all apps in one pool
+    completed = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for app_name, text in pool.map(_decompress_one_file, all_tasks):
             if text:
@@ -110,6 +111,9 @@ def phase_a_decompress(input_path, local_base, limit, workers=50):
                     if line:
                         f.write(line + "\n")
                         app_counts[app_name] += 1
+            completed += 1
+            if completed % 50 == 0 or completed == len(all_tasks):
+                print(f"  Decompressing... {completed}/{len(all_tasks)} files", flush=True)
 
     for f in app_files.values():
         f.close()
@@ -132,11 +136,15 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit):
         SparkSession.builder
         .appName("SparkEventLogExtractor")
         .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.ui.showConsoleProgress", "false")
         .getOrCreate()
     )
+    spark.sparkContext.setLogLevel("WARN")
 
     GB = 1024 ** 3
     results = []
+    total_apps = min(limit, len(app_names))
+    print(f"\nPhase B: Extracting metrics from {total_apps} apps using Spark", flush=True)
 
     # Infer schema once from the first app, reuse for all others
     schema = None
@@ -150,13 +158,13 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit):
         schema = spark.read.json(first_path).schema
         print(f"Schema inferred ({len(schema.fields)} fields), reusing for all apps")
 
-    for app_id in app_names[:limit]:
+    for idx, app_id in enumerate(app_names[:limit], 1):
         jsonl_path = os.path.join(local_base, app_id, "events.jsonl")
         if not os.path.exists(jsonl_path) or os.path.getsize(jsonl_path) == 0:
             print(f"  Skip {app_id}: no data")
             continue
 
-        print(f"Processing {app_id}...")
+        print(f"  [{idx}/{min(limit, len(app_names))}] Extracting {app_id}...", flush=True)
         try:
             if schema:
                 df = spark.read.schema(schema).json("file://" + jsonl_path)
