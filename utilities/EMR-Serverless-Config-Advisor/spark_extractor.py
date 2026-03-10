@@ -28,61 +28,36 @@ import zstandard as zstd
 
 # ── Phase A: Python decompress ──────────────────────────────────────
 
-def decompress_app(s3_client, bucket, app_prefix, app_name, local_base):
-    """Download and decompress all event files for one application."""
-    local_dir = os.path.join(local_base, app_name)
-    os.makedirs(local_dir, exist_ok=True)
-
-    paginator = s3_client.get_paginator("list_objects_v2")
-    keys = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=app_prefix):
-        for obj in page.get("Contents", []):
-            k = obj["Key"]
-            if "/events_" in k:
-                keys.append(k)
-
-    if not keys:
-        return app_name, 0
-
+def _decompress_one_file(args):
+    """Download and decompress a single S3 file. Returns (app_name, lines_text)."""
+    bucket, key, app_name = args
+    s3_client = boto3.client("s3", region_name="us-east-1")
     dctx = zstd.ZstdDecompressor()
-    out_path = os.path.join(local_dir, "events.jsonl")
-    written = 0
-
-    with open(out_path, "w") as out_f:
-        for key in keys:
-            try:
-                resp = s3_client.get_object(Bucket=bucket, Key=key)
-                raw = resp["Body"].read()
-
-                if key.endswith((".zstd", ".zst")):
-                    chunks = []
-                    with dctx.stream_reader(BytesIO(raw)) as reader:
-                        while True:
-                            chunk = reader.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            chunks.append(chunk)
-                    text = b"".join(chunks).decode("utf-8", errors="ignore")
-                elif key.endswith((".gz", ".gzip")):
-                    text = gzip.decompress(raw).decode("utf-8", errors="ignore")
-                elif key.endswith(".bz2"):
-                    text = bz2.decompress(raw).decode("utf-8", errors="ignore")
-                else:
-                    text = raw.decode("utf-8", errors="ignore")
-
-                for line in text.splitlines():
-                    line = line.strip()
-                    if line:
-                        out_f.write(line + "\n")
-                        written += 1
-            except Exception as e:
-                print(f"  Warning: {key}: {e}", file=sys.stderr)
-
-    return app_name, written
+    try:
+        raw = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        if key.endswith((".zstd", ".zst")):
+            chunks = []
+            with dctx.stream_reader(BytesIO(raw)) as reader:
+                while True:
+                    chunk = reader.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            text = b"".join(chunks).decode("utf-8", errors="ignore")
+        elif key.endswith((".gz", ".gzip")):
+            text = gzip.decompress(raw).decode("utf-8", errors="ignore")
+        elif key.endswith(".bz2"):
+            text = bz2.decompress(raw).decode("utf-8", errors="ignore")
+        else:
+            text = raw.decode("utf-8", errors="ignore")
+        return app_name, text
+    except Exception as e:
+        print(f"  Warning: {key}: {e}", file=sys.stderr)
+        return app_name, ""
 
 
-def phase_a_decompress(input_path, local_base, limit, workers=10):
-    """Decompress all apps from S3 to local jsonl files."""
+def phase_a_decompress(input_path, local_base, limit, workers=50):
+    """Decompress all apps from S3 to local jsonl files — flat parallelism."""
     parts = input_path.replace("s3://", "").split("/", 1)
     bucket = parts[0]
     prefix = parts[1] if len(parts) > 1 else ""
@@ -99,33 +74,52 @@ def phase_a_decompress(input_path, local_base, limit, workers=10):
         name = p.rstrip("/").rsplit("/", 1)[-1]
         if name.startswith("eventlog_v2_"):
             app_prefixes.append((p, name))
-
     app_prefixes = app_prefixes[:limit]
-    print(f"Phase A: Decompressing {len(app_prefixes)} apps with {workers} threads")
 
+    # List ALL files across all apps in one pass
+    all_tasks = []  # (bucket, key, app_name)
+    for app_prefix, app_name in app_prefixes:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=app_prefix):
+            for obj in page.get("Contents", []):
+                k = obj["Key"]
+                if "/events_" in k:
+                    all_tasks.append((bucket, k, app_name))
+
+    print(f"Phase A: Decompressing {len(app_prefixes)} apps, {len(all_tasks)} files with {workers} threads")
     os.makedirs(local_base, exist_ok=True)
-    start = time.time()
-    results = {}
 
+    # Open output files
+    app_files = {}
+    app_counts = {}
+    for _, app_name in app_prefixes:
+        d = os.path.join(local_base, app_name)
+        os.makedirs(d, exist_ok=True)
+        app_files[app_name] = open(os.path.join(d, "events.jsonl"), "w")
+        app_counts[app_name] = 0
+
+    start = time.time()
+
+    # Flat parallelism — all files across all apps in one pool
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(decompress_app, boto3.client("s3", region_name="us-east-1"),
-                        bucket, ap, name, local_base): name
-            for ap, name in app_prefixes
-        }
-        for f in as_completed(futures):
-            name = futures[f]
-            try:
-                app_name, lines = f.result()
-                results[app_name] = lines
-                print(f"  ✓ {app_name}: {lines} events")
-            except Exception as e:
-                print(f"  ✗ {name}: {e}", file=sys.stderr)
+        for app_name, text in pool.map(_decompress_one_file, all_tasks):
+            if text:
+                f = app_files[app_name]
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line:
+                        f.write(line + "\n")
+                        app_counts[app_name] += 1
+
+    for f in app_files.values():
+        f.close()
 
     elapsed = time.time() - start
-    total_lines = sum(results.values())
-    print(f"Phase A done: {len(results)} apps, {total_lines} events in {elapsed:.1f}s")
-    return list(results.keys())
+    total_lines = sum(app_counts.values())
+    for app_name, count in app_counts.items():
+        print(f"  ✓ {app_name}: {count} events")
+    print(f"Phase A done: {len(app_prefixes)} apps, {total_lines} events in {elapsed:.1f}s")
+    return list(app_counts.keys())
 
 
 # ── Phase B: Spark extraction ────────────────────────────────────────
@@ -144,6 +138,18 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit):
     GB = 1024 ** 3
     results = []
 
+    # Infer schema once from the first app, reuse for all others
+    schema = None
+    first_path = None
+    for app_id in app_names[:limit]:
+        p = os.path.join(local_base, app_id, "events.jsonl")
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            first_path = "file://" + p
+            break
+    if first_path:
+        schema = spark.read.json(first_path).schema
+        print(f"Schema inferred ({len(schema.fields)} fields), reusing for all apps")
+
     for app_id in app_names[:limit]:
         jsonl_path = os.path.join(local_base, app_id, "events.jsonl")
         if not os.path.exists(jsonl_path) or os.path.getsize(jsonl_path) == 0:
@@ -152,7 +158,10 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit):
 
         print(f"Processing {app_id}...")
         try:
-            df = spark.read.json("file://" + jsonl_path)
+            if schema:
+                df = spark.read.schema(schema).json("file://" + jsonl_path)
+            else:
+                df = spark.read.json("file://" + jsonl_path)
             df.cache()
             total_events = df.count()
 
@@ -434,7 +443,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", required=True, help="S3 path to event logs")
     parser.add_argument("--output", required=True, help="Output path for extracted metrics")
     parser.add_argument("--limit", type=int, default=100, help="Max apps")
-    parser.add_argument("--decompress-workers", type=int, default=10, help="Parallel download threads")
+    parser.add_argument("--decompress-workers", type=int, default=50, help="Parallel download threads")
     args = parser.parse_args()
 
     LOCAL_STAGING = "/tmp/spark_extractor_staging"
