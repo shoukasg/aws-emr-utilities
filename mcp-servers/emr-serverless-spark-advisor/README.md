@@ -344,7 +344,7 @@ aws emr create-cluster \
 ssh -i <your-key.pem> hadoop@<emr-primary-dns>
 
 # Install Python dependencies (Spark and boto3 are pre-installed on EMR)
-pip install pandas numpy
+pip install pandas numpy zstandard
 ```
 
 ### Performance Benchmarks (r5.24xlarge, 10 apps)
