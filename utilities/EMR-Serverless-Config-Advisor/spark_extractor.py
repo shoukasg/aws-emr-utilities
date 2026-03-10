@@ -303,51 +303,66 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit):
             )
 
             exec_full = (
-                exec_agg
-                .join(exec_added, exec_agg["exec_id"] == exec_added["added_id"], "left")
-                .join(exec_removed, exec_agg["exec_id"] == exec_removed["removed_id"], "left")
+                exec_added
+                .join(exec_agg, exec_added["added_id"] == exec_agg["exec_id"], "left")
+                .join(exec_removed, exec_added["added_id"] == exec_removed["removed_id"], "left")
                 .withColumn("cores", F.coalesce(F.col("cores"), F.lit(executor_cores_cfg)))
+                .withColumn("tasks", F.coalesce(F.col("tasks"), F.lit(0)))
+                .withColumn("total_run_time_ms", F.coalesce(F.col("total_run_time_ms"), F.lit(0)))
+                .withColumn("peak_jvm_heap", F.coalesce(F.col("peak_jvm_heap"), F.lit(0)))
                 .withColumn("remove_ts", F.coalesce(F.col("remove_ts"), F.lit(end_ts)))
                 .withColumn("uptime_ms",
                     F.when(F.col("add_ts").isNotNull() & F.col("remove_ts").isNotNull(),
                            F.col("remove_ts") - F.col("add_ts")).otherwise(F.lit(0)))
+                .withColumn("status",
+                    F.when(F.col("removed_id").isNotNull(), F.lit("dead")).otherwise(F.lit("active")))
                 .withColumn("mem_util",
                     F.when(F.col("peak_jvm_heap") > 0,
                            (F.col("peak_jvm_heap") / (1024.0 * 1024.0)) / executor_memory_mb * 100)
                     .otherwise(F.lit(0)))
                 .withColumn("cpu_util",
-                    F.when((F.col("uptime_ms") > 0) & (F.col("cores") > 0),
+                    F.when((F.col("uptime_ms") > 0) & (F.col("cores") > 0) & (F.col("total_run_time_ms") > 0),
                            F.least(F.col("total_run_time_ms") / (F.col("uptime_ms") * F.col("cores")) * 100, F.lit(100.0)))
                     .otherwise(F.lit(0)))
                 .withColumn("uptime_hours", F.col("uptime_ms") / (1000.0 * 60 * 60))
+                .withColumn("exec_cost",
+                    F.col("cores") * F.col("uptime_hours") * 0.05
+                    + F.lit(executor_memory_mb / 1024.0) * F.col("uptime_hours") * 0.005)
             )
 
             # Count executors allocated (from ExecutorAdded events)
             executors_allocated = int(exec_added.count())
 
+            active_count = int(exec_full.filter(F.col("status") == "active").count())
+            dead_count = int(exec_full.filter(F.col("status") == "dead").count())
+
             exec_summary = exec_full.agg(
-                F.count("*").alias("active_executors"),
+                F.count("*").alias("total_executors"),
                 F.coalesce(F.sum("cores"), F.lit(0)).alias("total_cores"),
                 F.round(F.coalesce(F.sum("uptime_hours"), F.lit(0)), 2).alias("total_uptime_hours"),
-                F.round(F.coalesce(F.avg("mem_util"), F.lit(0)), 2).alias("avg_mem_util"),
-                F.round(F.coalesce(F.avg("cpu_util"), F.lit(0)), 2).alias("avg_cpu_util"),
                 F.round(F.coalesce(F.max("peak_jvm_heap"), F.lit(0)) / GB, 2).alias("max_peak_gb"),
                 F.round(F.coalesce(F.avg("peak_jvm_heap"), F.lit(0)) / GB, 2).alias("avg_peak_gb"),
+                F.round(F.coalesce(F.sum("exec_cost"), F.lit(0)), 4).alias("total_cost"),
             ).first()
 
-            active_executors = int(exec_summary["active_executors"] or 0)
-            total_executors = executors_allocated
+            # Non-zero averages to match Python extractor
+            mem_avg_row = exec_full.filter(F.col("mem_util") > 0).agg(
+                F.round(F.avg("mem_util"), 2).alias("avg")).first()
+            cpu_avg_row = exec_full.filter(F.col("cpu_util") > 0).agg(
+                F.round(F.avg("cpu_util"), 2).alias("avg")).first()
+
+            total_executors = int(exec_summary["total_executors"] or 0)
             total_cores = int(exec_summary["total_cores"] or 0)
             total_uptime = float(exec_summary["total_uptime_hours"] or 0)
+            cost_factor = float(exec_summary["total_cost"] or 0)
+            avg_mem_util = float(mem_avg_row["avg"] or 0) if mem_avg_row else 0
+            avg_cpu_util = float(cpu_avg_row["avg"] or 0) if cpu_avg_row else 0
 
             total_task_time_hours = float(agg_result["total_run_time"] or 0) / (1000 * 60 * 60)
             total_core_hours = max(total_cores * total_uptime, 1)
             idle_pct = max(0, round((1 - total_task_time_hours / total_core_hours) * 100, 2))
 
             executor_memory_gb = executor_memory_mb / 1024
-            cost_factor = round(
-                (total_cores * total_uptime * 0.05) + (total_executors * executor_memory_gb * total_uptime * 0.005), 4
-            ) if total_cores else 0
 
             # ── Per-stage details ─────────────────────────────────
             stage_submitted = df.filter(F.col("Event") == "SparkListenerStageSubmitted")
@@ -467,14 +482,14 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit):
                 "stage_summary": {"stages": stage_details, "total_stages": len(stage_details)},
                 "executor_summary": {
                     "total_executors": total_executors,
-                    "active_executors": active_executors,
-                    "idle_executors": total_executors - active_executors,
+                    "active_executors": active_count,
+                    "dead_executors": dead_count,
                     "total_cores": total_cores,
                     "total_uptime_hours": total_uptime,
                     "max_peak_memory_gb": float(exec_summary["max_peak_gb"] or 0),
                     "avg_peak_memory_gb": float(exec_summary["avg_peak_gb"] or 0),
-                    "avg_memory_utilization_percent": float(exec_summary["avg_mem_util"] or 0),
-                    "avg_cpu_utilization_percent": float(exec_summary["avg_cpu_util"] or 0),
+                    "avg_memory_utilization_percent": avg_mem_util,
+                    "avg_cpu_utilization_percent": avg_cpu_util,
                     "idle_core_percentage": idle_pct,
                     "total_cost_factor": cost_factor,
                 },
