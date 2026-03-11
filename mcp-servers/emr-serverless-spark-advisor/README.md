@@ -36,41 +36,38 @@ AI → [get_bottlenecks] →
 │  │   CLI    │  │   Desktop    │  │   CLI    │  │  Agents    │  │
 │  └────┬─────┘  └──────┬───────┘  └────┬─────┘  └─────┬──────┘  │
 │       └───────────────┼───────────────┼──────────────┘          │
-│                  ┌────▼───────────────▼────┐                    │
-│                  │   MCP Protocol (stdio)  │                    │
-└──────────────────┼────────────────────────┼─────────────────────┘
-                   │                        │
-      ┌────────────▼────────────┐           │
-      │  Spark Config Advisor   │           │
-      │  MCP Server (local)     │           │
-      │                         │           │
-      │  12 Tools:              │           │
-      │  • analyze_spark_logs   │           │
-      │  • get_bottlenecks      │           │
-      │  • compare_performance  │           │
-      │  • list_applications    │           │
-      │  • ...8 more            │           │
-      └────────────┬────────────┘           │
-                   │ boto3 API              │
-      ┌────────────▼──────────────────────────────────────┐
-      │                    AWS Cloud                       │
-      │                                                    │
-      │  ┌─────────────────────────────────────────────┐   │
-      │  │         EMR Serverless Application           │   │
-      │  │                                              │   │
-      │  │  ┌──────────────┐  ┌──────────────┐         │   │
-      │  │  │spark_extractor│  │spark_extractor│  ...N  │   │
-      │  │  │  (App 1)     │  │  (App 2)     │         │   │
-      │  │  └──────┬───────┘  └──────┬───────┘         │   │
-      │  └─────────┼─────────────────┼─────────────────┘   │
-      │            ▼                 ▼                      │
-      │  ┌──────────────────────────────────┐               │
-      │  │            Amazon S3             │               │
-      │  │  /event-logs/     (input)        │               │
-      │  │  /task_stage_summary/ (extract)  │               │
-      │  │  /spark_config/      (configs)   │               │
-      │  └──────────────────────────────────┘               │
-      └────────────────────────────────────────────────────┘
+│              ┌────────▼───────────────▼──────┐                  │
+│              │  streamable-http (Function URL)│                  │
+│              │  or stdio (local dev)          │                  │
+└──────────────┼───────────────────────────────┼──────────────────┘
+               │                               │
+  ┌────────────▼────────────┐     ┌────────────▼────────────┐
+  │  AWS Lambda             │     │  Local (stdio)          │
+  │  Function URL + Mangum  │     │  python3 spark_advisor  │
+  │  ┌──────────────────┐   │     │  _mcp.py                │
+  │  │ spark_advisor_mcp │   │     └────────────┬────────────┘
+  │  │ 12 MCP Tools      │   │                  │
+  │  └────────┬──────────┘   │                  │
+  └───────────┼──────────────┘                  │
+              │ boto3 API                       │
+  ┌───────────▼─────────────────────────────────▼─────────────┐
+  │                    AWS Cloud                               │
+  │                                                            │
+  │  ┌─────────────────────────────────────────────┐           │
+  │  │         EMR Serverless Application           │           │
+  │  │  ┌──────────────┐  ┌──────────────┐         │           │
+  │  │  │spark_extractor│  │spark_extractor│  ...N  │           │
+  │  │  │  (App 1)     │  │  (App 2)     │         │           │
+  │  │  └──────┬───────┘  └──────┬───────┘         │           │
+  │  └─────────┼─────────────────┼─────────────────┘           │
+  │            ▼                 ▼                              │
+  │  ┌──────────────────────────────────┐                      │
+  │  │            Amazon S3             │                      │
+  │  │  /event-logs/     (input)        │                      │
+  │  │  /task_stage_summary/ (extract)  │                      │
+  │  │  /spark_config/      (configs)   │                      │
+  │  └──────────────────────────────────┘                      │
+  └────────────────────────────────────────────────────────────┘
 ```
 
 **Flow:**
@@ -105,7 +102,6 @@ AI → [get_bottlenecks] →
 
 - An EMR Serverless application (Spark)
 - `spark_extractor.py` uploaded to S3
-- Docker (for Lambda deployment)
 
 ### 1. Create EMR Serverless Application
 
@@ -131,30 +127,45 @@ aws s3 cp zstandard.zip s3://your-bucket/scripts/zstandard.zip
 
 ### 3. Deploy to Lambda
 
-The MCP server runs in Lambda using [Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter) for streamable HTTP transport.
+The MCP server runs in Lambda using [Mangum](https://github.com/jordanerber/mangum) to bridge the MCP ASGI app with Lambda's event model. Dependencies are packaged as a Lambda layer.
 
 ```bash
-# Create the Lambda function (container image, 15 min timeout for EMR Serverless jobs)
-aws lambda create-function \
-  --function-name spark-config-advisor-mcp \
-  --package-type Image \
-  --code ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/spark-config-advisor-mcp:latest \
-  --role arn:aws:iam::ACCOUNT:role/YourLambdaRole \
-  --timeout 900 \
-  --memory-size 512 \
-  --environment "Variables={EMR_SERVERLESS_APP_ID=YOUR_APP_ID,EMR_EXECUTION_ROLE=arn:aws:iam::ACCOUNT:role/EMRServerlessRole,SCRIPT_S3_PATH=s3://bucket/scripts/spark_extractor.py,OUTPUT_S3_PATH=s3://bucket/advisor-output,AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap}" \
+# 1. Build the Lambda layer (mcp, mangum, and dependencies)
+pip3 install --target /tmp/lambda-layer/python mcp mangum
+pip3 install --target /tmp/lambda-layer/python \
+  --platform manylinux2014_x86_64 --only-binary=:all: --upgrade \
+  pydantic-core rpds-py cffi cryptography
+find /tmp/lambda-layer/python -name "*darwin*" -delete
+cd /tmp/lambda-layer && zip -r /tmp/mcp-layer.zip python/
+
+aws lambda publish-layer-version \
+  --layer-name mcp-server-deps \
+  --zip-file fileb:///tmp/mcp-layer.zip \
+  --compatible-runtimes python3.12 python3.13 python3.14 \
   --region us-east-1
 
-# Add a Function URL (for MCP streamable HTTP)
+# 2. Create the Lambda function
+zip /tmp/mcp-function.zip lambda_handler.py spark_advisor_mcp.py
+
+aws lambda create-function \
+  --function-name spark-config-advisor-mcp \
+  --runtime python3.14 \
+  --handler lambda_handler.handler \
+  --zip-file fileb:///tmp/mcp-function.zip \
+  --role arn:aws:iam::ACCOUNT:role/YourLambdaRole \
+  --layers arn:aws:lambda:us-east-1:ACCOUNT:layer:mcp-server-deps:LATEST \
+  --timeout 900 \
+  --memory-size 512 \
+  --environment "Variables={EMR_SERVERLESS_APP_ID=YOUR_APP_ID,EMR_EXECUTION_ROLE=arn:aws:iam::ACCOUNT:role/EMRServerlessRole,SCRIPT_S3_PATH=s3://bucket/scripts/spark_extractor.py,OUTPUT_S3_PATH=s3://bucket/advisor-output}" \
+  --region us-east-1
+
+# 3. Add a Function URL (for MCP streamable HTTP)
 aws lambda create-function-url-config \
   --function-name spark-config-advisor-mcp \
   --auth-type AWS_IAM
-
-# Build and deploy
-./deploy.sh
 ```
 
-The `deploy.sh` script builds the Docker image, pushes to ECR, and updates the Lambda function.
+The Lambda role needs: `AmazonS3FullAccess`, EMR Serverless permissions, and `iam:PassRole` for the EMR execution role.
 
 ### 4. Configure MCP Client
 
@@ -202,7 +213,7 @@ Point your MCP client at the Lambda Function URL:
 | `SCRIPT_S3_PATH` | Yes | S3 path to `spark_extractor.py` |
 | `ARCHIVES_S3_PATH` | No | S3 path to `zstandard.zip` (for zstd logs) |
 | `OUTPUT_S3_PATH` | Yes | S3 base path for extracted output |
-| `AWS_REGION` | No | AWS region (default: us-east-1) |
+| `AWS_REGION` | No | AWS region (default: us-east-1). In Lambda, use `ADVISOR_AWS_REGION` instead (AWS_REGION is reserved) |
 | `MCP_TRANSPORT` | No | `streamable-http` (default, for Lambda) or `stdio` (local) |
 
 ## Example Conversation
@@ -242,9 +253,8 @@ AI: [calls get_bottlenecks(application_id="00g0nlpd9atac00b")]
 ```
 emr-serverless-spark-advisor/
 ├── spark_advisor_mcp.py      # MCP server (12 tools, uses EMR Serverless + S3)
-├── Dockerfile                # Lambda container image (with Web Adapter)
-├── deploy.sh                 # Build + push to ECR + update Lambda
-├── requirements.txt          # Dependencies (mcp, boto3)
+├── lambda_handler.py         # Lambda entry point (Mangum ASGI bridge)
+├── requirements.txt          # Dependencies (mcp, mangum, boto3)
 ├── README.md
 └── legacy/                   # Previous SSH-based implementation
     ├── spark_advisor_mcp.py
