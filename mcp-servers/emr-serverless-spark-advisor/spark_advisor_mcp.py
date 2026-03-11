@@ -18,6 +18,7 @@ Configuration via environment variables:
 import json, os, time, logging
 import boto3
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 log = logging.getLogger("spark-advisor-mcp")
 
@@ -26,12 +27,16 @@ EXEC_ROLE = os.environ.get("EMR_EXECUTION_ROLE", "")
 SCRIPT_PATH = os.environ.get("SCRIPT_S3_PATH", "")
 ARCHIVES_PATH = os.environ.get("ARCHIVES_S3_PATH", "")
 OUTPUT_BASE = os.environ.get("OUTPUT_S3_PATH", "").rstrip("/")
-REGION = os.environ.get("AWS_REGION", "us-east-1")
+REGION = os.environ.get("ADVISOR_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
 emr = boto3.client("emr-serverless", region_name=REGION)
 s3 = boto3.client("s3", region_name=REGION)
 
-mcp = FastMCP("spark-config-advisor")
+mcp = FastMCP(
+    "spark-config-advisor",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 # ── S3 helpers ────────────────────────────────────────────────────────
 
