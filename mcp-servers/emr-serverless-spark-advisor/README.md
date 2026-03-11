@@ -1,368 +1,142 @@
-# EMR Serverless Spark Config Advisor MCP Server
+# EMR Serverless Spark Config Advisor — MCP Server
 
-[![MCP](https://img.shields.io/badge/MCP-1.0-blue)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](../../LICENSE)
 
-> **🤖 Connect AI agents to EMR Serverless for intelligent Spark configuration recommendations, job analysis, and performance optimization**
+An [MCP](https://modelcontextprotocol.io) server that analyzes Spark event logs and generates optimized EMR Serverless configurations. Uses EMR Serverless for extraction (no EMR EC2 cluster needed) and reads results from S3.
 
-An MCP (Model Context Protocol) server that analyzes Apache Spark event logs from Amazon EMR Serverless and **generates optimized EMR Serverless Spark configurations** — right-sized worker types, executor counts, memory, and shuffle partitions. Also provides bottleneck detection, comparative analysis, and stage-level diagnostics. Works with any MCP-compatible client including [Kiro](https://kiro.dev), Claude Desktop, Amazon Q CLI, and LangGraph agents.
+Works with [Kiro](https://kiro.dev), Claude Desktop, Amazon Q CLI, and any MCP-compatible client.
 
-## 🎯 What is This?
+## How It Works
 
-This MCP server bridges AI agents with your EMR Serverless Spark workloads. The **primary capability** is generating production-ready EMR Serverless configurations from your actual Spark event logs:
+```
+You: "Analyze my Spark logs at s3://my-bucket/event-logs/"
 
-- 🎯 **Generate optimized EMR Serverless configurations** — cost-optimized or performance-optimized worker sizing, executor counts, memory, shuffle partitions, and dynamic allocation settings
-- 🔍 **Analyze Spark event logs** from S3 and extract detailed metrics
-- 🚨 **Identify bottlenecks** — CPU waste, memory pressure, spill, idle executors
-- 🔄 **Compare applications** — performance metrics and Spark config diffs
-- 📊 **Stage-level analysis** — find the slowest stages and their root causes
-- 📈 **Resource timeline** — visualize executor scaling behavior over time
-- 🔎 **SQL plan analysis** — compare execution plans between runs
+AI → [analyze_spark_logs] → submits parallel EMR Serverless jobs → extracts metrics → returns:
 
-## 🏗️ Architecture
+  12 apps analyzed in 153s
+  Top cost: eg-user-attribute-store (cost_factor: 96.8, idle: 86%)
+  Peak shuffle: 1278 GB/stage (exceeds 200GB Serverless storage limit)
+
+You: "What are the bottlenecks for app 00g0jaejehl1980b?"
+
+AI → [get_bottlenecks] →
+  HIGH: 52% idle core-hours
+  HIGH: 2 TB disk spill on 0.16 GB input
+  HIGH: Peak stage shuffle 1278 GB — not eligible for Serverless managed storage
+```
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        MCP Clients                              │
 │  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌────────────┐  │
-│  │   Kiro   │  │ Claude       │  │ Amazon Q │  │ LangGraph  │  │
-│  │   CLI    │  │ Desktop      │  │ CLI      │  │ Agents     │  │
+│  │   Kiro   │  │    Claude    │  │ Amazon Q │  │ LangGraph  │  │
+│  │   CLI    │  │   Desktop    │  │   CLI    │  │  Agents    │  │
 │  └────┬─────┘  └──────┬───────┘  └────┬─────┘  └─────┬──────┘  │
-│       │               │               │              │          │
 │       └───────────────┼───────────────┼──────────────┘          │
-│                       │               │                         │
 │                  ┌────▼───────────────▼────┐                    │
 │                  │   MCP Protocol (stdio)  │                    │
-│                  └────────────┬────────────┘                    │
-└───────────────────────────────┼──────────────────────────────────┘
-                                │
-                   ┌────────────▼────────────┐
-                   │  Spark Config Advisor   │
-                   │     MCP Server          │
-                   │                         │
-                   │  12 Tools:              │
-                   │  • analyze_spark_logs   │
-                   │  • list_applications    │
-                   │  • get_application      │
-                   │  • get_bottlenecks      │
-                   │  • compare_performance  │
-                   │  • compare_environments │
-                   │  • list_slowest_stages  │
-                   │  • get_stage_details    │
-                   │  • get_resource_timeline│
-                   │  • list_sql_executions  │
-                   │  • compare_sql_plans    │
-                   │  • list_event_logs      │
-                   └────────────┬────────────┘
-                                │ SSH
-                   ┌────────────▼────────────┐
-                   │  EMR Primary Node       │
-                   │                         │
-                   │  ┌───────────────────┐  │
-                   │  │ Spark Extractor   │  │
-                   │  │ (PySpark)         │  │
-                   │  │                   │  │
-                   │  │ Phase A: Parallel  │  │
-                   │  │ S3 decompress     │  │
-                   │  │                   │  │
-                   │  │ Phase B: Spark    │  │
-                   │  │ metric extraction │  │
-                   │  └────────┬──────────┘  │
-                   │           │              │
-                   │  ┌────────▼──────────┐  │
-                   │  │ EMR Recommender   │  │
-                   │  │                   │  │
-                   │  │ Worker sizing     │  │
-                   │  │ Executor tuning   │  │
-                   │  │ Shuffle partitions│  │
-                   │  └───────────────────┘  │
-                   └────────────┬────────────┘
-                                │
-                   ┌────────────▼────────────┐
-                   │     Amazon S3           │
-                   │                         │
-                   │  Spark Event Logs       │
-                   │  (EMR Serverless)       │
-                   └─────────────────────────┘
+└──────────────────┼────────────────────────┼─────────────────────┘
+                   │                        │
+      ┌────────────▼────────────┐           │
+      │  Spark Config Advisor   │           │
+      │  MCP Server (local)     │           │
+      │                         │           │
+      │  12 Tools:              │           │
+      │  • analyze_spark_logs   │           │
+      │  • get_bottlenecks      │           │
+      │  • compare_performance  │           │
+      │  • list_applications    │           │
+      │  • ...8 more            │           │
+      └────────────┬────────────┘           │
+                   │ boto3 API              │
+      ┌────────────▼──────────────────────────────────────┐
+      │                    AWS Cloud                       │
+      │                                                    │
+      │  ┌─────────────────────────────────────────────┐   │
+      │  │         EMR Serverless Application           │   │
+      │  │                                              │   │
+      │  │  ┌──────────────┐  ┌──────────────┐         │   │
+      │  │  │spark_extractor│  │spark_extractor│  ...N  │   │
+      │  │  │  (App 1)     │  │  (App 2)     │         │   │
+      │  │  └──────┬───────┘  └──────┬───────┘         │   │
+      │  └─────────┼─────────────────┼─────────────────┘   │
+      │            ▼                 ▼                      │
+      │  ┌──────────────────────────────────┐               │
+      │  │            Amazon S3             │               │
+      │  │  /event-logs/     (input)        │               │
+      │  │  /task_stage_summary/ (extract)  │               │
+      │  │  /spark_config/      (configs)   │               │
+      │  └──────────────────────────────────┘               │
+      └────────────────────────────────────────────────────┘
 ```
 
-### Processing Pipeline
+**Flow:**
+1. MCP client sends `analyze_spark_logs` with S3 path
+2. MCP server discovers apps, submits 1 EMR Serverless job per app (parallel)
+3. Each job runs `spark_extractor.py` — reads compressed event logs, extracts 80+ metrics
+4. MCP server reads results from S3, returns recommendations
+5. All other tools (`get_bottlenecks`, `compare_*`, etc.) read cached results from S3
 
-```
-S3 Event Logs ──► Phase A: Decompress ──► Phase B: Spark Extract ──► Recommender
-                  (50 parallel threads)    (PySpark local[*])        (Python)
-                  bz2/zstd → jsonl         Per-app aggregation       Worker sizing
-                                           Stage/executor/SQL        Spark configs
-                                           metrics extraction        Shuffle tuning
-```
+**No SSH, no EMR EC2 cluster, no infrastructure to manage.**
 
-**Phase A** downloads and decompresses event log files from S3 in parallel (50 threads). **Phase B** uses PySpark to aggregate task metrics, executor utilization, stage details, and SQL plans per application. The **EMR Recommender** is the core output — it generates production-ready EMR Serverless configurations including worker type, executor count, memory sizing, shuffle partitions, and dynamic allocation settings (cost-optimized or performance-optimized).
-
-## 🛠️ Available Tools
-
-The MCP server provides **12 specialized tools**. The core tool is `analyze_spark_logs` which generates production-ready EMR Serverless configurations; the remaining tools support interactive exploration and debugging.
-
-### 🎯 EMR Serverless Configuration Recommendations (Core)
+## Tools
 
 | Tool | Description |
-|---|---|
-| `analyze_spark_logs` | **Primary tool.** Full pipeline: extract metrics from S3 event logs and generate optimized EMR Serverless configurations — worker type, executor count, memory, shuffle partitions, dynamic allocation (cost or performance optimized) |
-| `list_event_log_prefixes` | Browse available Spark event log application prefixes in S3 |
+|------|-------------|
+| **`analyze_spark_logs`** | Extract metrics via EMR Serverless and generate recommendations |
+| `list_event_log_prefixes` | Browse S3 for available event log apps |
+| `list_applications` | List extracted apps with summary metrics |
+| `get_application` | Full metrics + Spark config for one app |
+| `get_bottlenecks` | Severity-ranked findings: CPU, memory, spill, idle cores, shuffle storage |
+| `compare_job_performance` | Side-by-side metrics with % deltas |
+| `compare_job_environments` | Diff Spark configs between two apps |
+| `list_slowest_stages` | Top N stages by duration with IO/shuffle/spill |
+| `get_stage_details` | Deep dive into one stage |
+| `get_resource_timeline` | Executor add/remove events over time |
+| `list_sql_executions` | SQL queries with duration |
+| `compare_sql_execution_plans` | Diff physical plans between two SQL queries |
 
-### 🔍 Application Querying
-
-| Tool | Description |
-|---|---|
-| `list_applications` | List all extracted applications with summary metrics (sorted by cost factor) |
-| `get_application` | Get detailed metrics for a specific application — executor summary, IO, spill, Spark config |
-
-### 🚨 Bottleneck Analysis
-
-| Tool | Description |
-|---|---|
-| `get_bottlenecks` | Identify performance bottlenecks with severity-ranked, actionable recommendations. Analyzes CPU, memory, executors, spill, shuffle, stages, and failures |
-
-### 🔄 Comparative Analysis
-
-| Tool | Description |
-|---|---|
-| `compare_job_performance` | Side-by-side performance metrics between two applications with percentage deltas |
-| `compare_job_environments` | Diff Spark configurations between two applications — different values, unique configs |
-
-### ⚡ Stage Analysis
-
-| Tool | Description |
-|---|---|
-| `list_slowest_stages` | Get the N slowest stages sorted by duration with IO/shuffle/spill per stage |
-| `get_stage_details` | Deep dive into a specific stage's metrics |
-
-### 📈 Resource & SQL Analysis
-
-| Tool | Description |
-|---|---|
-| `get_resource_timeline` | Chronological executor add/remove events with running count — shows scaling behavior |
-| `list_sql_executions` | List all SQL queries with duration and plan size |
-| `compare_sql_execution_plans` | Compare physical execution plans between two SQL queries across applications |
-
-### 🤖 How LLMs Use These Tools
-
-| User Query | Tools Selected |
-|---|---|
-| *"Analyze my Spark logs and recommend EMR Serverless configs"* | `analyze_spark_logs` |
-| *"Optimize my EMR Serverless job for cost"* | `analyze_spark_logs` (cost-optimized mode) |
-| *"Why is my job slow?"* | `get_bottlenecks` + `list_slowest_stages` |
-| *"Compare today's run with yesterday's"* | `compare_job_performance` + `compare_job_environments` |
-| *"What's wrong with stage 5?"* | `get_stage_details` |
-| *"Show me resource usage over time"* | `get_resource_timeline` |
-| *"Find my slowest SQL queries"* | `list_sql_executions` + `compare_sql_execution_plans` |
-| *"List all applications sorted by cost"* | `list_applications` |
-
-## ⚡ Quick Start
+## Setup
 
 ### Prerequisites
 
 - Python 3.10+
-- An EMR on EC2 cluster — see [EMR on EC2 Cluster Setup](#-emr-on-ec2-cluster-setup) below
-- SSH key access to the EMR primary node
-- `mcp` Python package: `pip install mcp`
+- AWS credentials with access to EMR Serverless, S3
+- An EMR Serverless application (Spark)
+- `spark_extractor.py` uploaded to S3
 
-### 1. Set Up the EMR Cluster
-
-Follow the detailed [EMR on EC2 Cluster Setup](#-emr-on-ec2-cluster-setup) section below to:
-- Create an EMR cluster with Spark
-- Deploy the pipeline scripts
-- Install dependencies
-- Configure your MCP client
-
-### 2. Start Using
-
-```
-You: "Analyze Spark logs at s3://my-bucket/event-logs/ and recommend cost-optimized configs"
-
-AI: [calls analyze_spark_logs] → Extracts metrics from 10 applications, generates recommendations...
-
-You: "Which app has the worst bottlenecks?"
-
-AI: [calls list_applications, then get_bottlenecks] →
-    App 00g0jaejehl1980b has 3 HIGH severity issues:
-    - 57% of executors were idle (203/354 never ran tasks)
-    - 99.6% idle core percentage
-    - 2 TB disk spill on 0.16 GB input
-
-You: "Compare that app's config with the healthy one"
-
-AI: [calls compare_job_environments] → 57 config differences found...
-```
-
-## 📊 Example Output
-
-### Configuration Recommendation for EMR Serverless
-
-The primary output — production-ready EMR Serverless Spark configurations derived from your actual workload metrics:
-
-```json
-{
-  "worker": {
-    "type": "Large",
-    "vcpu": 16,
-    "memory_gb": 108,
-    "max_executors": 191,
-    "min_executors": 95
-  },
-  "spark_configs": {
-    "spark.executor.cores": "16",
-    "spark.executor.memory": "108g",
-    "spark.executor.instances": "191",
-    "spark.sql.shuffle.partitions": "4938",
-    "spark.emr-serverless.executor.disk": "500G",
-    "spark.dynamicAllocation.enabled": "true"
-  }
-}
-```
-
-### Bottleneck Analysis
-
-```json
-{
-  "application_id": "00g0jaejehl1980b",
-  "bottleneck_count": 4,
-  "findings": [
-    {
-      "severity": "HIGH",
-      "category": "Executors",
-      "finding": "203/354 executors (57.3%) were allocated but never ran tasks",
-      "recommendation": "Tune spark.dynamicAllocation.maxExecutors or increase idle timeout"
-    },
-    {
-      "severity": "HIGH",
-      "category": "Cores",
-      "finding": "Idle core percentage is 99.61%",
-      "recommendation": "Most core-hours are wasted. Reduce total cores or improve parallelism"
-    },
-    {
-      "severity": "HIGH",
-      "category": "Spill",
-      "finding": "Disk spill: 2088.31 GB, Memory spill: 7517.98 GB",
-      "recommendation": "Increase executor memory or spark.sql.shuffle.partitions"
-    }
-  ]
-}
-```
-
-## 🔧 EMR on EC2 Cluster Setup
-
-The extraction pipeline uses PySpark (`spark-submit`), so it must run on a node with Spark installed. The MCP server SSHs into the EMR primary node to run the pipeline. This section covers everything you need to set up on the EMR cluster.
-
-### Step 1: Create an EMR Cluster
+### 1. Create EMR Serverless Application
 
 ```bash
-aws emr create-cluster \
-  --name "spark-advisor-processing" \
-  --release-label emr-7.0.0 \
-  --applications Name=Spark \
-  --instance-type r5.4xlarge \
-  --instance-count 1 \
-  --ec2-attributes KeyName=<your-key-pair>,SubnetId=<your-subnet-id> \
-  --use-default-roles \
+aws emr-serverless create-application \
+  --name spark-advisor \
+  --release-label emr-7.7.0 \
+  --type SPARK \
   --region us-east-1
 ```
 
-A single-node cluster (primary only) is sufficient — the extractor runs PySpark in `local[*]` mode on the primary node.
+Note the `applicationId` from the output.
 
-#### Instance Sizing
-
-The memory requirements only apply to the **batch extraction phase** (`analyze_spark_logs`). All interactive tools (list, compare, bottlenecks, etc.) use negligible memory. If you only extract up to 10 apps at a time, an r5.4xlarge is sufficient for any workload.
-
-| Workload | Instance Type | Memory | Concurrent Apps |
-|---|---|---|---|
-| Small (1-10 apps) | r5.4xlarge | 128 GB | Up to 10 apps per extraction |
-| Medium (10-50 apps) | r5.16xlarge | 512 GB | Up to 50 apps per extraction |
-| Large (50-100+ apps) | r5.24xlarge | 768 GB | 100+ apps per extraction |
-
-#### Security Group
-
-Ensure the EMR primary node's security group allows **inbound SSH (port 22)** from your local machine's IP. You can find the security group in the EMR console under **Cluster > Security and access > EC2 security groups > Primary node**.
-
-### Step 2: SSH into the EMR Primary Node
+### 2. Upload Extraction Script to S3
 
 ```bash
-# Get the primary node DNS from the EMR console or CLI
-aws emr describe-cluster --cluster-id <cluster-id> --query 'Cluster.MasterPublicDnsName' --output text
+# From the EMR-Serverless-Config-Advisor directory
+aws s3 cp spark_extractor.py s3://your-bucket/scripts/spark_extractor.py
 
-# SSH in
-ssh -i <your-key.pem> hadoop@<emr-primary-dns>
+# If using zstd-compressed event logs, also upload the zstandard archive
+aws s3 cp zstandard.zip s3://your-bucket/scripts/zstandard.zip
 ```
 
-### Step 3: Deploy Pipeline Scripts
-
-From your **local machine**, copy the three pipeline scripts to the EMR primary node:
+### 3. Install & Configure MCP Client
 
 ```bash
-cd mcp-servers/emr-serverless-spark-advisor/
-
-scp -i <your-key.pem> \
-  spark_extractor.py \
-  pipeline_wrapper.py \
-  emr_recommender.py \
-  hadoop@<emr-primary-dns>:~/
+pip install mcp boto3
 ```
 
-### Step 4: Install Python Dependencies
-
-SSH into the EMR primary node and install the required packages. Spark and boto3 are pre-installed on EMR.
-
-```bash
-ssh -i <your-key.pem> hadoop@<emr-primary-dns>
-
-# Install additional Python dependencies
-pip install pandas numpy zstandard
-
-# Create the output directory used by the MCP server
-mkdir -p /tmp/spark_advisor_output
-```
-
-### Step 5: Verify the Setup
-
-Run these checks on the EMR primary node to confirm everything is ready:
-
-```bash
-# Verify Spark is available
-spark-submit --version
-
-# Verify Python dependencies
-python3 -c "import pandas, numpy, zstandard, boto3; print('All dependencies OK')"
-
-# Verify the pipeline scripts are in place
-ls ~/spark_extractor.py ~/pipeline_wrapper.py ~/emr_recommender.py
-
-# Verify S3 access to your event logs
-aws s3 ls s3://<your-bucket>/<your-event-log-prefix>/
-
-# Quick test: run the extractor on a single app (optional)
-spark-submit --master local[*] --conf spark.driver.memory=32g \
-  ~/spark_extractor.py \
-  --input s3://<your-bucket>/<your-event-log-prefix>/ \
-  --output /tmp/spark_advisor_output \
-  --limit 1
-```
-
-If the test succeeds, you should see output like:
-```
-Phase A: Decompressing 1 apps, 470 files with 50 threads
-  Decompressing... 470/470 files
-Phase A done: 1 apps, 1694243 events in 13.0s
-Phase B: Extracting metrics from 1 apps using Spark
-  [1/1] Extracting eventlog_v2_00g0dtj5r0om5o0b...
-Writing 1 results to /tmp/spark_advisor_output
-✅ Extraction complete: 1 applications
-```
-
-### Step 6: Configure the MCP Server (Local Machine)
-
-Back on your **local machine**, configure the MCP server to point to the EMR cluster. Set the environment variables `EC2_HOST` and `SSH_KEY` in your MCP client config:
-
-#### Kiro CLI (`~/.kiro/settings/mcp.json`)
+**Kiro CLI** (`~/.kiro/settings/mcp.json`):
 
 ```json
 {
@@ -371,99 +145,91 @@ Back on your **local machine**, configure the MCP server to point to the EMR clu
       "command": "python3",
       "args": ["/path/to/spark_advisor_mcp.py"],
       "env": {
-        "EC2_HOST": "hadoop@<emr-primary-dns>",
-        "SSH_KEY": "/path/to/<your-key>.pem",
-        "AWS_DEFAULT_REGION": "us-east-1"
+        "EMR_SERVERLESS_APP_ID": "00g1234567890",
+        "EMR_EXECUTION_ROLE": "arn:aws:iam::ACCOUNT:role/EMRServerlessRole",
+        "SCRIPT_S3_PATH": "s3://your-bucket/scripts/spark_extractor.py",
+        "ARCHIVES_S3_PATH": "s3://your-bucket/scripts/zstandard.zip",
+        "OUTPUT_S3_PATH": "s3://your-bucket/advisor-output",
+        "AWS_REGION": "us-east-1"
       }
     }
   }
 }
 ```
 
-#### Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`)
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`): same format.
 
-```json
-{
-  "mcpServers": {
-    "spark-config-advisor": {
-      "command": "python3",
-      "args": ["/path/to/spark_advisor_mcp.py"],
-      "env": {
-        "EC2_HOST": "hadoop@<emr-primary-dns>",
-        "SSH_KEY": "/path/to/<your-key>.pem"
-      }
-    }
-  }
-}
+**Amazon Q CLI** (`~/.aws/amazonq/mcp.json`): same format.
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `EMR_SERVERLESS_APP_ID` | Yes | EMR Serverless application ID |
+| `EMR_EXECUTION_ROLE` | Yes | IAM role ARN for job execution |
+| `SCRIPT_S3_PATH` | Yes | S3 path to `spark_extractor.py` |
+| `ARCHIVES_S3_PATH` | No | S3 path to `zstandard.zip` (for zstd logs) |
+| `OUTPUT_S3_PATH` | Yes | S3 base path for extracted output |
+| `AWS_REGION` | No | AWS region (default: us-east-1) |
+
+## Example Conversation
+
+```
+User: Analyze the Spark event logs at s3://my-bucket/event-logs/ and tell me
+      which jobs are wasting the most resources.
+
+AI: I'll analyze those logs now.
+    [calls analyze_spark_logs(input_path="s3://my-bucket/event-logs/")]
+
+    Extracted 12 applications in 153 seconds. Here are the top resource wasters:
+
+    1. eg-user-attribute-store (00g0nlpd9atac00b)
+       - Cost factor: 96.8 | Idle cores: 86% | Duration: 37 min
+       - 1,225 GB memory spill on 20.8 TB input
+
+    2. eg-user-attribute-store (00g0dtj5r0om5o0b)
+       - Cost factor: 60.6 | Idle cores: 78% | Duration: 46 min
+
+User: What are the bottlenecks for the first one?
+
+AI: [calls get_bottlenecks(application_id="00g0nlpd9atac00b")]
+
+    HIGH: 86% idle core-hours — most allocated cores sit unused
+    HIGH: 1,225 GB memory spill — executor memory too small for data volume
+    MEDIUM: Low CPU utilization (14%) — over-provisioned for compute
+
+    Recommendations:
+    - Increase executor memory to reduce spill
+    - Reduce max executors from current level
+    - Increase shuffle partitions to spread data more evenly
 ```
 
-#### Amazon Q CLI (`~/.aws/amazonq/mcp.json`)
-
-```json
-{
-  "mcpServers": {
-    "spark-config-advisor": {
-      "command": "python3",
-      "args": ["/path/to/spark_advisor_mcp.py"],
-      "env": {
-        "EC2_HOST": "hadoop@<emr-primary-dns>",
-        "SSH_KEY": "/path/to/<your-key>.pem"
-      }
-    }
-  }
-}
-```
-
-### When You Create a New EMR Cluster
-
-Every time you spin up a new EMR cluster, you need to:
-
-1. **Deploy the scripts** (Step 3) — `scp` the 3 Python files to `~/`
-2. **Install dependencies** (Step 4) — `pip install pandas numpy zstandard`
-3. **Create output directory** (Step 4) — `mkdir -p /tmp/spark_advisor_output`
-4. **Update MCP config** (Step 6) — change `EC2_HOST` to the new primary node DNS
-5. **Restart your MCP client** — so it picks up the new config
-
-### Troubleshooting
-
-| Issue | Cause | Fix |
-|---|---|---|
-| `Connection refused` or `Connection timed out` | Security group blocks SSH | Add inbound rule for port 22 from your IP |
-| `Permission denied (publickey)` | Wrong SSH key or user | Verify key path and use `hadoop@` as the user |
-| `Pipeline failed: 0 JSON files` | Scripts not deployed | Re-run Step 3 (`scp` the scripts) |
-| `ModuleNotFoundError: pandas` | Dependencies not installed | Re-run Step 4 (`pip install`) |
-| `spark-submit: command not found` | Not an EMR cluster | Use an EMR on EC2 cluster, not a plain EC2 instance |
-| `Loaded 0 JSON files` | Wrong S3 path or no event logs | Verify path with `aws s3 ls s3://your-bucket/prefix/` |
-
-### Performance Benchmarks (r5.24xlarge, 10 apps)
-
-| Phase | Time | Peak Memory |
-|---|---|---|
-| Phase A: Decompress (1,676 files) | 85s | 48 GB |
-| Phase B: Spark Extract (3M+ tasks) | 62s | 59 GB |
-| Recommender | 1.4s | < 1 GB |
-| **Total Pipeline** | **151s** | **59 GB** |
-
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 emr-serverless-spark-advisor/
-├── spark_advisor_mcp.py          # MCP server (12 tools)
-├── spark_extractor.py            # PySpark-based metric extraction
-├── pipeline_wrapper.py           # Orchestrates extract → recommend pipeline
-├── emr_recommender.py            # EMR Serverless configuration recommender
-├── requirements.txt              # Python dependencies
-└── README.md                     # This file
+├── spark_advisor_mcp.py      # MCP server (12 tools, uses EMR Serverless + S3)
+├── requirements.txt          # Dependencies (mcp, boto3)
+├── README.md
+└── legacy/                   # Previous SSH-based implementation
+    ├── spark_advisor_mcp.py
+    ├── spark_extractor.py
+    ├── pipeline_wrapper.py
+    ├── emr_recommender.py
+    ├── format_to_job_config.py
+    └── write_to_iceberg.py
 ```
 
-## 🤝 Contributing
+## Troubleshooting
 
-See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines.
+| Issue | Fix |
+|-------|-----|
+| `Missing config: EMR_SERVERLESS_APP_ID` | Set all required env vars in MCP client config |
+| `No event log apps found` | Check S3 path — should contain `eventlog_v2_*` or `application_*` subdirs |
+| EMR Serverless job FAILED | Check CloudWatch logs for the job run |
+| `Application not found` | Run `analyze_spark_logs` first to extract data |
+| Slow extraction | Normal — first run takes ~150s for 12 apps. Subsequent queries use cached S3 data |
 
-## 📄 License
+## License
 
-Apache License 2.0 — see [LICENSE](../../LICENSE) for details.
-
-## 🔗 Related Projects
-
-- [EMR Serverless Config Advisor](../utilities/EMR-Serverless-Config-Advisor/) — The underlying extraction and recommendation engine
+Apache License 2.0 — see [LICENSE](../../LICENSE).
