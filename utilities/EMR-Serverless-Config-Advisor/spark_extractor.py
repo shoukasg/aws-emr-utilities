@@ -873,6 +873,7 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                 "extraction_engine": "pyspark",
                 "event_count": total_events,
                 "file_count": len(list_app_files(bucket, app_s3_info[app_id][0], app_s3_info[app_id][1])) if s3_mode and app_id in app_s3_info else 0,
+                "src_event_log_location": f"s3://{bucket}/{app_s3_info[app_id][0]}" if s3_mode and app_id in app_s3_info else "",
                 "application_info": {
                     "job_id": job_id, "cluster_id": cluster_id,
                     "application_name": app_name, "app_id": spark_app_id,
