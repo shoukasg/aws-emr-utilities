@@ -103,10 +103,9 @@ AI → [get_bottlenecks] →
 
 ### Prerequisites
 
-- Python 3.10+
-- AWS credentials with access to EMR Serverless, S3
 - An EMR Serverless application (Spark)
 - `spark_extractor.py` uploaded to S3
+- Docker (for Lambda deployment)
 
 ### 1. Create EMR Serverless Application
 
@@ -130,11 +129,36 @@ aws s3 cp spark_extractor.py s3://your-bucket/scripts/spark_extractor.py
 aws s3 cp zstandard.zip s3://your-bucket/scripts/zstandard.zip
 ```
 
-### 3. Install & Configure MCP Client
+### 3. Deploy to Lambda
+
+The MCP server runs in Lambda using [Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter) for streamable HTTP transport.
 
 ```bash
-pip install mcp boto3
+# Create the Lambda function (container image, 15 min timeout for EMR Serverless jobs)
+aws lambda create-function \
+  --function-name spark-config-advisor-mcp \
+  --package-type Image \
+  --code ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/spark-config-advisor-mcp:latest \
+  --role arn:aws:iam::ACCOUNT:role/YourLambdaRole \
+  --timeout 900 \
+  --memory-size 512 \
+  --environment "Variables={EMR_SERVERLESS_APP_ID=YOUR_APP_ID,EMR_EXECUTION_ROLE=arn:aws:iam::ACCOUNT:role/EMRServerlessRole,SCRIPT_S3_PATH=s3://bucket/scripts/spark_extractor.py,OUTPUT_S3_PATH=s3://bucket/advisor-output,AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap}" \
+  --region us-east-1
+
+# Add a Function URL (for MCP streamable HTTP)
+aws lambda create-function-url-config \
+  --function-name spark-config-advisor-mcp \
+  --auth-type AWS_IAM
+
+# Build and deploy
+./deploy.sh
 ```
+
+The `deploy.sh` script builds the Docker image, pushes to ECR, and updates the Lambda function.
+
+### 4. Configure MCP Client
+
+Point your MCP client at the Lambda Function URL:
 
 **Kiro CLI** (`~/.kiro/settings/mcp.json`):
 
@@ -142,24 +166,32 @@ pip install mcp boto3
 {
   "mcpServers": {
     "spark-config-advisor": {
-      "command": "python3",
-      "args": ["/path/to/spark_advisor_mcp.py"],
-      "env": {
-        "EMR_SERVERLESS_APP_ID": "00g1234567890",
-        "EMR_EXECUTION_ROLE": "arn:aws:iam::ACCOUNT:role/EMRServerlessRole",
-        "SCRIPT_S3_PATH": "s3://your-bucket/scripts/spark_extractor.py",
-        "ARCHIVES_S3_PATH": "s3://your-bucket/scripts/zstandard.zip",
-        "OUTPUT_S3_PATH": "s3://your-bucket/advisor-output",
-        "AWS_REGION": "us-east-1"
-      }
+      "type": "streamable-http",
+      "url": "https://YOUR_FUNCTION_URL.lambda-url.us-east-1.on.aws/mcp/"
     }
   }
 }
 ```
 
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`): same format.
+**Local development** (stdio mode, no Lambda):
 
-**Amazon Q CLI** (`~/.aws/amazonq/mcp.json`): same format.
+```json
+{
+  "mcpServers": {
+    "spark-config-advisor": {
+      "command": "python3",
+      "args": ["spark_advisor_mcp.py"],
+      "env": {
+        "MCP_TRANSPORT": "stdio",
+        "EMR_SERVERLESS_APP_ID": "YOUR_APP_ID",
+        "EMR_EXECUTION_ROLE": "arn:aws:iam::ACCOUNT:role/EMRServerlessRole",
+        "SCRIPT_S3_PATH": "s3://bucket/scripts/spark_extractor.py",
+        "OUTPUT_S3_PATH": "s3://bucket/advisor-output"
+      }
+    }
+  }
+}
+```
 
 ### Environment Variables
 
@@ -171,6 +203,7 @@ pip install mcp boto3
 | `ARCHIVES_S3_PATH` | No | S3 path to `zstandard.zip` (for zstd logs) |
 | `OUTPUT_S3_PATH` | Yes | S3 base path for extracted output |
 | `AWS_REGION` | No | AWS region (default: us-east-1) |
+| `MCP_TRANSPORT` | No | `streamable-http` (default, for Lambda) or `stdio` (local) |
 
 ## Example Conversation
 
@@ -209,6 +242,8 @@ AI: [calls get_bottlenecks(application_id="00g0nlpd9atac00b")]
 ```
 emr-serverless-spark-advisor/
 ├── spark_advisor_mcp.py      # MCP server (12 tools, uses EMR Serverless + S3)
+├── Dockerfile                # Lambda container image (with Web Adapter)
+├── deploy.sh                 # Build + push to ECR + update Lambda
 ├── requirements.txt          # Dependencies (mcp, boto3)
 ├── README.md
 └── legacy/                   # Previous SSH-based implementation
