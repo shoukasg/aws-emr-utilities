@@ -585,23 +585,52 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                     driver_mem_gb = float(driver_mem_str[:-1]) / 1024
 
             driver_host = None
+            driver_port = None
             if app_start_row:
                 try:
                     driver_host = getattr(app_start_row, "Driver Host", None)
+                    driver_port = str(getattr(app_start_row, "Driver Port", None) or "")
                 except:
                     pass
+
+            # Driver GC metrics from SparkListenerExecutorMetricsUpdate for driver
+            driver_gc_time = 0
+            driver_gc_count = 0
+            driver_peak_offheap = 0
+            driver_avg_offheap = 0
+            driver_mem_samples = 0
+
+            # Count jobs/stages submitted from driver perspective
+            total_jobs_submitted = int(df.filter(F.col("Event") == "SparkListenerJobStart").count())
+            total_stages_submitted = int(df.filter(F.col("Event") == "SparkListenerStageSubmitted").count())
+
+            peak_heap = float(driver_mem_row["peak_heap"]) if driver_mem_row else 0
+            avg_heap = float(driver_mem_row["avg_heap"]) if driver_mem_row else 0
 
             driver_metrics = {
                 "driver_id": "driver",
                 "host": driver_host or "N/A",
+                "port": driver_port or "",
                 "cores": driver_cores,
+                "memory_mb": int(driver_mem_gb * 1024),
                 "start_time": datetime.fromtimestamp(start_ts / 1000).isoformat() if start_ts else None,
                 "end_time": datetime.fromtimestamp(end_ts / 1000).isoformat() if end_ts else None,
                 "uptime_hours": duration_hours or 0,
-                "peak_jvm_heap_memory_gb": float(driver_mem_row["peak_heap"]) if driver_mem_row else 0,
-                "avg_jvm_heap_memory_gb": float(driver_mem_row["avg_heap"]) if driver_mem_row else 0,
+                "total_tasks_launched": task_count,
+                "total_jobs_submitted": total_jobs_submitted,
+                "total_stages_submitted": total_stages_submitted,
+                "total_result_bytes_received": 0,
+                "peak_jvm_heap_memory_gb": peak_heap,
+                "peak_jvm_off_heap_memory_gb": driver_peak_offheap,
+                "avg_jvm_heap_memory_gb": avg_heap,
+                "avg_jvm_off_heap_memory_gb": driver_avg_offheap,
+                "gc_time_ms": driver_gc_time,
+                "gc_count": driver_gc_count,
+                "memory_metrics_samples": driver_mem_samples,
+                "total_result_bytes_received_gb": 0.0,
                 "configured_memory_gb": driver_mem_gb,
-                "memory_utilization_percent": round(float(driver_mem_row["peak_heap"]) / driver_mem_gb * 100, 2) if driver_mem_row and driver_mem_gb > 0 else 0,
+                "memory_utilization_percent": round(peak_heap / driver_mem_gb * 100, 2) if driver_mem_gb > 0 else 0,
+                "avg_gc_time_per_task_ms": 0,
             }
 
             # ── Job details ──────────────────────────────────────
@@ -613,6 +642,21 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                 F.col("`Submission Time`").alias("submit_ts"),
                 F.col("`Stage IDs`").alias("stage_ids"),
             ).collect()
+
+            # Safely extract job group from Properties
+            js_fields = [f.name for f in job_starts.schema.fields]
+            job_group_map = {}
+            if "Properties" in js_fields:
+                try:
+                    jg_rows = job_starts.select(
+                        F.col("`Job ID`").alias("jid"),
+                        F.col("Properties.`spark.jobGroup.id`").alias("jg"),
+                    ).collect()
+                    for r in jg_rows:
+                        if r["jg"]:
+                            job_group_map[r["jid"]] = r["jg"]
+                except:
+                    pass
 
             job_end_rows = job_ends.select(
                 F.col("`Job ID`").alias("job_id"),
@@ -658,10 +702,13 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                     "completion_time": datetime.fromtimestamp(comp_ts / 1000).isoformat() if comp_ts else None,
                     "duration_ms": dur_ms,
                     "failure_reason": failure,
+                    "job_group": job_group_map.get(jid),
                     "num_stages": len(sids),
                 })
 
             total_jobs = len(jobs)
+            durations = [j["duration_ms"] for j in jobs if j["duration_ms"] is not None]
+            avg_dur_sec = round(sum(durations) / len(durations) / 1000, 2) if durations else None
             job_details = {
                 "summary": {
                     "total_jobs": total_jobs,
@@ -669,6 +716,7 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                     "failed_jobs": failed_jobs,
                     "running_jobs": running,
                     "success_rate_percent": round(successful / total_jobs * 100, 2) if total_jobs > 0 else 0,
+                    "avg_duration_seconds": avg_dur_sec,
                 },
                 "jobs": sorted(jobs, key=lambda j: j["job_id"], reverse=True),
             }
@@ -772,6 +820,13 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                 F.col("time").alias("start_time"),
             ).collect()
 
+            # Also try to get details (stack trace) from SQL start events
+            sql_detail_fields = [f.name for f in sql_starts.schema.fields]
+            sql_details_map = {}
+            if "details" in sql_detail_fields:
+                for r in sql_starts.select(F.col("executionId").alias("eid"), F.col("details")).collect():
+                    sql_details_map[r["eid"]] = r["details"] or ""
+
             sql_end_map = {}
             for r in sql_ends.select(F.col("executionId").alias("exec_id"), F.col("time").alias("end_time")).collect():
                 sql_end_map[r["exec_id"]] = r["end_time"]
@@ -784,13 +839,21 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                 dur = (end_t - r["start_time"]) if end_t and r["start_time"] else None
                 if end_t:
                     completed_sql += 1
+                    status = "COMPLETED"
                 else:
                     running_sql += 1
+                    status = "RUNNING"
                 sql_executions.append({
                     "execution_id": int(eid),
                     "description": (r["description"] or "")[:200],
+                    "details": sql_details_map.get(eid, ""),
+                    "submission_time": datetime.fromtimestamp(r["start_time"] / 1000).isoformat() if r["start_time"] else None,
+                    "completion_time": datetime.fromtimestamp(end_t / 1000).isoformat() if end_t else None,
+                    "duration_ms": int(dur) if dur else None,
                     "duration_sec": round(dur / 1000, 1) if dur else None,
+                    "status": status,
                     "physical_plan": r["plan"] or "",
+                    "physical_plan_description": r["plan"] or "",
                 })
 
             sql_metrics = {
@@ -868,6 +931,8 @@ def phase_b_spark_extract(app_names, local_base, output_path, limit,
                         "approach": "jvm_heap_memory",
                         "formula": "(peak_jvm_heap_mb / executor_memory_mb) * 100",
                         "data_source": "TaskExecutorMetrics.JVMHeapMemory",
+                        "executor_memory_mb": executor_memory_mb,
+                        "note": "Uses actual JVM heap usage from Task Executor Metrics in TaskEnd events",
                     },
                     "driver_info": driver_info,
                     "executor_details": executor_details,
