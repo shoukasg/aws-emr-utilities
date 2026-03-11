@@ -77,15 +77,21 @@ def phase_a_decompress(input_path, local_base, limit, workers=50):
         if name.startswith("eventlog_v2_"):
             app_prefixes.append((p, name, True))
     
-    # Check for application_ directories (EMR on EC2 single-file logs)
-    if not app_prefixes:
-        for cp in resp.get("CommonPrefixes", []):
-            p = cp["Prefix"]
-            name = p.rstrip("/").rsplit("/", 1)[-1]
-            if name.startswith("application_"):
-                app_prefixes.append((p, name, False))
+    # Check for application_ directories (EMR on EC2 logs in subdirectories)
+    for cp in resp.get("CommonPrefixes", []):
+        p = cp["Prefix"]
+        name = p.rstrip("/").rsplit("/", 1)[-1]
+        if name.startswith("application_"):
+            app_prefixes.append((p, name, False))
     
-    # If no subdirectories, check if prefix itself is an app directory
+    # Check for bare application_ files at root level (not in subdirectories)
+    for obj in resp.get("Contents", []):
+        k = obj["Key"]
+        name = k.rsplit("/", 1)[-1]
+        if name.startswith("application_") and not k.endswith("/"):
+            app_prefixes.append((k, name, False))
+    
+    # If no apps found, check if prefix itself is an app directory
     if not app_prefixes:
         dir_name = prefix.rstrip("/").rsplit("/", 1)[-1]
         if dir_name.startswith("eventlog_v2_"):
