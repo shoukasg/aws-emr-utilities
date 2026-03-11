@@ -54,6 +54,7 @@ Analyzes Spark event logs from EMR on EC2 or EMR Serverless and generates optimi
 | Script | Purpose |
 |--------|---------|
 | `spark_extractor.py` | Extracts metrics from Spark event logs using PySpark |
+| `python_extractor.py` | Extracts metrics from Spark event logs using pure Python (no Spark required) |
 | `lambda_orchestrator.py` | Lambda function that submits parallel EMR Serverless jobs |
 | `emr_recommender.py` | Generates cost/performance optimized Spark configurations |
 | `write_to_iceberg.py` | Writes metrics + recommendations to Iceberg table via Spark |
@@ -97,6 +98,27 @@ spark-submit --master local[*] --driver-memory 32g \
   --input s3://your-bucket/event-logs/ \
   --output /tmp/output/
 ```
+
+### Option 3: Pure Python (no Spark required)
+
+Run extraction on any machine with Python 3.7+ — no Spark or PySpark needed:
+
+```bash
+python3 python_extractor.py \
+  --input s3://your-bucket/event-logs/ \
+  --output /tmp/output/
+```
+
+For a single application:
+
+```bash
+python3 python_extractor.py \
+  --input s3://your-bucket/event-logs/app_123/ \
+  --output /tmp/output/ \
+  --single-app
+```
+
+Output format is identical to `spark_extractor.py` and works with `emr_recommender.py`.
 
 ## Extracted Metrics
 
@@ -202,6 +224,17 @@ ORDER BY total_memory_spilled_gb DESC;
 | `--single-app` | Input path is a single app (not a directory of apps) | false |
 | `--decompress-workers` | Parallel S3 download threads | 50 |
 
+### python_extractor.py
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--input` | S3 path or local path to event logs | *required* |
+| `--output` | Output path for extracted metrics | *required* |
+| `--limit` | Max applications to process | 100 |
+| `--single-app` | Input path is a single app (not a directory of apps) | false |
+| `--workers` | Parallel processing workers | 4 |
+| `--profile` | AWS profile name for S3 access | default |
+
 ### emr_recommender.py
 
 | Flag | Description | Default |
@@ -233,7 +266,7 @@ ORDER BY total_memory_spilled_gb DESC;
 
 ## Legacy Scripts
 
-Previous Python-based extraction scripts are in the `legacy/` folder. The Spark extractor (`spark_extractor.py`) fully replaces `spark_processor.py` with identical output and 4× faster execution.
+Previous Python-based extraction scripts are in the `legacy/` folder. Both `spark_extractor.py` (PySpark) and `python_extractor.py` (pure Python) replace `legacy/spark_processor.py` with identical output format.
 
 ## License
 
