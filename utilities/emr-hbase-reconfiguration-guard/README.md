@@ -1,58 +1,34 @@
-# HBase Bootstrap Action to Prevent Service Restarts During Reconfiguration
+# EMR HBase Reconfiguration Guard
 
-## Overview
+Prevent HBase services from restarting when reconfiguring an EMR cluster.
 
-When you reconfigure an EMR cluster with HBase (e.g., changing `hbase-site.xml` properties via `modify-instance-groups`), EMR's Puppet automation restarts all HBase services (RegionServer, Master, Thrift, REST). This causes downtime and disrupts in-flight operations.
+## Problem
 
-This bootstrap action prevents HBase services from restarting during reconfiguration while still applying the configuration changes to disk. The config files are updated, but services continue running with the previous configuration until manually restarted.
+When you reconfigure an EMR HBase cluster (e.g., updating `hbase-site.xml` properties via `modify-instance-groups`), all HBase services — RegionServer, Master, Thrift, and REST — are automatically restarted. This causes unexpected downtime and disrupts in-flight operations.
 
-> **Important:** With this bootstrap action, reconfiguration only updates the config files on disk — it does **not** make the running HBase services pick up the new settings. To apply the new configuration, you must restart the HBase services yourself at a time that works for your workload. This gives you full control over when the restart happens, avoiding unexpected downtime during reconfiguration.
+## Solution
+
+A bootstrap action that modifies the HBase Puppet manifest so that configuration changes are applied to disk without triggering automatic service restarts. This gives you full control over when HBase services are restarted.
+
+> **Important:** After reconfiguration, the config files on disk are updated but the running HBase services still use the previous settings. You must restart the services yourself for the new configuration to take effect.
 
 ### Restarting HBase Services
 
-After reconfiguration, restart services on each node when you are ready for the changes to take effect:
+After reconfiguration, restart services on each node when you are ready:
 
 ```bash
-# Restart RegionServer (on core/task nodes)
+# On core/task nodes
 sudo systemctl restart hbase-regionserver
 
-# Restart Master (on master node)
+# On master node
 sudo systemctl restart hbase-master
 
-# Restart Thrift Server (if applicable)
+# If applicable
 sudo systemctl restart hbase-thrift
-
-# Restart REST Server (if applicable)
 sudo systemctl restart hbase-rest
 ```
 
-You can also perform a rolling restart to minimize impact — restart one RegionServer at a time, waiting for the region reassignment to complete before moving to the next node.
-
-## How It Works
-
-EMR uses Puppet to manage HBase services. The default `init.pp` manifest uses `subscribe` directives that trigger service restarts whenever config files (`hbase-site.xml`, `hbase-env.sh`, `log4j2.properties`, `hadoop-metrics2-hbase.properties`) change.
-
-The modified `init.pp` replaces `subscribe` with `require` for all HBase services:
-- `subscribe` = "restart this service when the config file changes"
-- `require` = "ensure config files exist before starting, but don't restart on changes"
-
-This affects all four HBase services: RegionServer, Master, Thrift Server, and REST Server.
-
-## Artifacts
-
-| File | Description |
-|------|-------------|
-| `replace_hbase_init_pp.sh` | Bootstrap action script — backs up original `init.pp` and replaces it with the modified version from S3 |
-| `init.pp` | Modified Puppet manifest for HBase (tested on EMR 7.12) |
-
-## Compatibility
-
-| EMR Version | `init.pp` Version | Notes |
-|-------------|-------------------|-------|
-| 7.3 | Uses `log4j.properties` | Original version tested by customer |
-| 7.12 | Uses `log4j2.properties` | Tested — `init.pp` in this repo is for 7.12 |
-
-> **Important:** The `init.pp` file differs between EMR versions (e.g., `log4j.properties` vs `log4j2.properties`). Always verify the original `init.pp` on your target EMR version at `/var/aws/emr/bigtop-deploy/puppet/modules/hadoop_hbase/manifests/init.pp` before deploying.
+You can perform a rolling restart — one RegionServer at a time — to minimize impact on your workload.
 
 ## Setup
 
@@ -61,10 +37,7 @@ This affects all four HBase services: RegionServer, Master, Thrift Server, and R
    aws s3 cp init.pp s3://YOUR-BUCKET/stop_hbase_restart/init.pp
    ```
 
-2. Update the S3 path in `replace_hbase_init_pp.sh` to point to your bucket:
-   ```bash
-   sudo aws s3 cp s3://YOUR-BUCKET/stop_hbase_restart/init.pp /var/aws/emr/bigtop-deploy/puppet/modules/hadoop_hbase/manifests/init.pp
-   ```
+2. Update the S3 path in `replace_hbase_init_pp.sh` to point to your bucket.
 
 3. Upload the bootstrap script:
    ```bash
@@ -74,56 +47,40 @@ This affects all four HBase services: RegionServer, Master, Thrift Server, and R
 4. Add the bootstrap action when creating your EMR cluster:
    ```bash
    aws emr create-cluster \
-     --bootstrap-actions '[{"Name":"Stop HBase restart on Reconfiguration","Path":"s3://YOUR-BUCKET/scripts/replace_hbase_init_pp.sh"}]' \
+     --bootstrap-actions '[{
+       "Name": "Stop HBase restart on Reconfiguration",
+       "Path": "s3://YOUR-BUCKET/scripts/replace_hbase_init_pp.sh"
+     }]' \
      ...
    ```
 
+## Artifacts
+
+| File | Description |
+|------|-------------|
+| `replace_hbase_init_pp.sh` | Bootstrap action script — backs up the original manifest and replaces it with the modified version |
+| `init.pp` | Modified Puppet manifest for HBase (EMR 7.12) |
+
+> **Note:** The `init.pp` file may differ between EMR versions. Always verify the original at `/var/aws/emr/bigtop-deploy/puppet/modules/hadoop_hbase/manifests/init.pp` on your target version before deploying.
+
 ## Test Results — EMR 7.12
 
-Tested on 2026-03-12 with two EMR 7.12.0 clusters (m5.xlarge, 1 master + 1 core, HBase on S3).
+Two EMR 7.12.0 clusters (m5.xlarge, 1 master + 1 core, HBase on S3). Reconfiguration added `hbase.rpc.timeout=120000` via `modify-instance-groups`.
 
-Reconfiguration applied: added `hbase.rpc.timeout=120000` to `hbase-site.xml` via `modify-instance-groups`.
+### Without Bootstrap Action
 
-### Scenario 1 — Without Bootstrap Action
+| | Before | After |
+|---|---|---|
+| RegionServer PID | `12489` | `15499` **(changed)** |
+| hbase-site.xml updated | — | ✅ |
 
-Cluster: `j-1LNTCECQS64Q0`
+HBase RegionServer was restarted automatically during reconfiguration.
 
-**Before Reconfiguration (Core Node):**
-- RegionServer PID: `12489`
-- RegionServer start time: `07:47`
-- hbase-site.xml: `3687 bytes, Mar 12 07:47`
+### With Bootstrap Action
 
-**After Reconfiguration (Core Node):**
-- RegionServer PID: `15499` **(changed)**
-- RegionServer start time: `07:52` **(changed)**
-- hbase-site.xml: `3776 bytes, Mar 12 07:52` (updated)
-- `hbase.rpc.timeout` property: ✅ present
+| | Before | After |
+|---|---|---|
+| RegionServer PID | `9457` | `9457` **(unchanged)** |
+| hbase-site.xml updated | — | ✅ |
 
-**Observation:** HBase RegionServer was restarted (PID changed from 12489 → 15499). Config was applied.
-
-### Scenario 2 — With Bootstrap Action
-
-Cluster: `j-11WUXAJYKM9YA`
-
-**Before Reconfiguration (Core Node):**
-- RegionServer PID: `9457`
-- RegionServer start time: `07:41`
-- hbase-site.xml: `3690 bytes, Mar 12 07:48`
-
-**After Reconfiguration (Core Node):**
-- RegionServer PID: `9457` **(unchanged)**
-- RegionServer start time: `07:41` **(unchanged)**
-- hbase-site.xml: `3779 bytes, Mar 12 07:52` (updated)
-- `hbase.rpc.timeout` property: ✅ present
-
-**Observation:** HBase RegionServer was NOT restarted (PID remained 9457). Config was applied to disk.
-
-### Verification
-
-The bootstrap action was confirmed active on Cluster B:
-- Backup file exists: `/var/aws/emr/bigtop-deploy/puppet/modules/hadoop_hbase/manifests/init.pp.bak`
-- `subscribe` count in modified `init.pp`: **0** (all removed)
-
-### Conclusion
-
-The bootstrap action successfully prevents HBase service restarts during reconfiguration on EMR 7.12. Configuration changes are written to disk but services continue running uninterrupted.
+HBase RegionServer was **not** restarted. Config was applied to disk. Service continued running uninterrupted.
