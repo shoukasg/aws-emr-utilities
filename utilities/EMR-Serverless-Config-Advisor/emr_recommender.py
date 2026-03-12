@@ -235,9 +235,10 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
     # Sanitize NaN values - replace with 0 for numeric columns
     df = df.fillna(0)
     
-    # Separate apps with and without input data
-    df_with_data = df[df['io_total_input_gb'] > 0].sort_values('io_total_input_gb', ascending=False).head(limit)
-    df_no_data = df[df['io_total_input_gb'] == 0].head(limit)
+    # Separate apps with and without data (include shuffle-only workloads as "with data")
+    has_data = (df['io_total_input_gb'] > 0) | (df['io_total_shuffle_read_gb'] > 0) | (df['io_total_shuffle_write_gb'] > 0)
+    df_with_data = df[has_data].sort_values('io_total_input_gb', ascending=False).head(limit)
+    df_no_data = df[~has_data].head(limit)
     
     log.info("Processing %d applications with data, %d with no input data", len(df_with_data), len(df_no_data))
     
@@ -270,7 +271,7 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         def auto_tune_custom(shuffle_bytes, max_executors):
             target_mib = target_partition_size_mib
             if shuffle_bytes > 0:
-                partitions = int((shuffle_bytes / (target_mib * 1024 * 1024)) + 0.5)
+                partitions = max(2, int((shuffle_bytes / (target_mib * 1024 * 1024)) + 0.5))
             else:
                 # Scale by input size (128MB per partition) instead of flat 200
                 partitions = max(2, min(200, int(i_in_gb / 0.128)))
