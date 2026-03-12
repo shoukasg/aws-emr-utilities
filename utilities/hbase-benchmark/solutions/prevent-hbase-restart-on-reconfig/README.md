@@ -6,6 +6,28 @@ When you reconfigure an EMR cluster with HBase (e.g., changing `hbase-site.xml` 
 
 This bootstrap action prevents HBase services from restarting during reconfiguration while still applying the configuration changes to disk. The config files are updated, but services continue running with the previous configuration until manually restarted.
 
+> **Important:** With this bootstrap action, reconfiguration only updates the config files on disk — it does **not** make the running HBase services pick up the new settings. To apply the new configuration, you must restart the HBase services yourself at a time that works for your workload. This gives you full control over when the restart happens, avoiding unexpected downtime during reconfiguration.
+
+### Restarting HBase Services
+
+After reconfiguration, restart services on each node when you are ready for the changes to take effect:
+
+```bash
+# Restart RegionServer (on core/task nodes)
+sudo systemctl restart hbase-regionserver
+
+# Restart Master (on master node)
+sudo systemctl restart hbase-master
+
+# Restart Thrift Server (if applicable)
+sudo systemctl restart hbase-thrift
+
+# Restart REST Server (if applicable)
+sudo systemctl restart hbase-rest
+```
+
+You can also perform a rolling restart to minimize impact — restart one RegionServer at a time, waiting for the region reassignment to complete before moving to the next node.
+
 ## How It Works
 
 EMR uses Puppet to manage HBase services. The default `init.pp` manifest uses `subscribe` directives that trigger service restarts whenever config files (`hbase-site.xml`, `hbase-env.sh`, `log4j2.properties`, `hadoop-metrics2-hbase.properties`) change.
