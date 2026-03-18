@@ -104,9 +104,9 @@ def _select_worker_type(input_gb: float, shuffle_ratio: float,
                         max_peak_mem_gb: float = 0, orig_cores: int = 0) -> Tuple[str, Dict]:
     # EMR Serverless memory ranges per vCPU size
     WORKER_RANGES = {
-        "Small":  {"vcpu": 4,  "min_mem": 8,  "max_mem": 30, "mem_step": 1},
-        "Medium": {"vcpu": 8,  "min_mem": 16, "max_mem": 60, "mem_step": 4},
-        "Large":  {"vcpu": 16, "min_mem": 32, "max_mem": 120, "mem_step": 8},
+        "Small":  {"vcpu": 4,  "min_mem": 8,  "max_mem": 27, "mem_step": 1},
+        "Medium": {"vcpu": 8,  "min_mem": 16, "max_mem": 54, "mem_step": 4},
+        "Large":  {"vcpu": 16, "min_mem": 32, "max_mem": 108, "mem_step": 8},
     }
 
     # Select worker size based on data volume and spill (workload properties)
@@ -132,6 +132,9 @@ def _select_worker_type(input_gb: float, shuffle_ratio: float,
     # Round down to valid EMR Serverless memory increment (headroom already included)
     step = r["mem_step"]
     mem = min(r["max_mem"], max(r["min_mem"], r["min_mem"] + ((mem - r["min_mem"]) // step) * step))
+    # If within one step of max, use max (e.g. 108GB for Large)
+    if mem + step > r["max_mem"]:
+        mem = r["max_mem"]
 
     return size, {"vcpu": r["vcpu"], "memory": mem}
 
@@ -139,7 +142,8 @@ def _select_worker_type(input_gb: float, shuffle_ratio: float,
 def _compute_exec_limits(input_gb: float, vcpu: int, partitions: int = 0,
                         mem_pct: float = 60.0, cpu_pct: float = 50.0,
                         idle_pct: float = 50.0, spill_gb: float = 0.0,
-                        mode: str = "cost", max_stage_tasks: int = 0) -> Tuple[int, int]:
+                        mode: str = "cost", max_stage_tasks: int = 0,
+                        has_shuffle: bool = True) -> Tuple[int, int]:
     req_input = max(1, int(input_gb / 100))
     part_divisor = 4 if mode == "cost" else 3
     req_part = max(1, int((partitions / vcpu) / part_divisor)) if partitions > 0 else 0
@@ -155,9 +159,15 @@ def _compute_exec_limits(input_gb: float, vcpu: int, partitions: int = 0,
     
     max_exec = max(2, int(base_req * factor))
 
-    # Task parallelism floor — performance mode only
-    if mode == "performance" and max_stage_tasks > 0 and spill_gb == 0:
-        task_floor = max(2, int(max_stage_tasks / vcpu / 3))
+    # Task parallelism floor
+    if max_stage_tasks > 0 and spill_gb == 0:
+        if mode == "performance":
+            task_floor = max(2, int(max_stage_tasks / vcpu / 3))
+        elif not has_shuffle:
+            # Cost mode: only for non-shuffle jobs (shuffle jobs use partition formula)
+            task_floor = max(2, int(max_stage_tasks / vcpu / 4))
+        else:
+            task_floor = 0
         max_exec = max(max_exec, task_floor)
 
     min_exec = max(1, max_exec // 2)
@@ -295,6 +305,7 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         
         shuffle_data_gb = max(s_in_gb, s_out_gb)
         shuffle_bytes = shuffle_data_gb * 1024 * 1024 * 1024
+        has_shuffle = shuffle_data_gb > 0
         
         # Custom partition calculation
         def auto_tune_custom(shuffle_bytes, max_executors):
@@ -310,21 +321,21 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         
         # Cost-optimized
         max_exec_cost_init, min_exec_cost = _compute_exec_limits(
-            i_in_gb, worker_cfg["vcpu"], 0, mem_pct, cpu_pct, idle_pct, spill_gb, mode="cost", max_stage_tasks=max_stage_tasks
+            i_in_gb, worker_cfg["vcpu"], 0, mem_pct, cpu_pct, idle_pct, spill_gb, mode="cost", max_stage_tasks=max_stage_tasks, has_shuffle=has_shuffle
         )
         sp_cost, target_mib_cost = auto_tune_custom(shuffle_bytes, max_exec_cost_init)
         max_exec_cost, min_exec_cost = _compute_exec_limits(
-            i_in_gb, worker_cfg["vcpu"], sp_cost, mem_pct, cpu_pct, idle_pct, spill_gb, mode="cost", max_stage_tasks=max_stage_tasks
+            i_in_gb, worker_cfg["vcpu"], sp_cost, mem_pct, cpu_pct, idle_pct, spill_gb, mode="cost", max_stage_tasks=max_stage_tasks, has_shuffle=has_shuffle
         )
         executor_disk_cost = _calculate_executor_disk(s_out_gb, disk_spill_gb, spill_gb, max_exec_cost)
         
         # Performance-optimized
         max_exec_perf_init, min_exec_perf = _compute_exec_limits(
-            i_in_gb, worker_cfg["vcpu"], 0, mem_pct, cpu_pct, idle_pct, spill_gb, mode="performance", max_stage_tasks=max_stage_tasks
+            i_in_gb, worker_cfg["vcpu"], 0, mem_pct, cpu_pct, idle_pct, spill_gb, mode="performance", max_stage_tasks=max_stage_tasks, has_shuffle=has_shuffle
         )
         sp_perf, target_mib_perf = auto_tune_custom(shuffle_bytes, max_exec_perf_init)
         max_exec_perf, min_exec_perf = _compute_exec_limits(
-            i_in_gb, worker_cfg["vcpu"], sp_perf, mem_pct, cpu_pct, idle_pct, spill_gb, mode="performance", max_stage_tasks=max_stage_tasks
+            i_in_gb, worker_cfg["vcpu"], sp_perf, mem_pct, cpu_pct, idle_pct, spill_gb, mode="performance", max_stage_tasks=max_stage_tasks, has_shuffle=has_shuffle
         )
         executor_disk_perf = _calculate_executor_disk(s_out_gb, disk_spill_gb, spill_gb, max_exec_perf)
         
@@ -365,8 +376,12 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
             cfg.update(_get_iceberg_configs())
             if sh_ratio > 30:
                 cfg.update({"spark.shuffle.compress": "true", "spark.shuffle.spill.compress": "true"})
-            # Serverless storage: if max stage shuffle write <= 75% of 200GB limit
-            if max_stage_shuf_write <= 150:
+            # Serverless storage: shuffle fits in 200GB limit
+            # If recommended memory > peak memory with headroom, spill likely eliminated
+            spill_likely_gone = (max_peak_mem_gb > 0 and worker_cfg["memory"] >= max_peak_mem_gb * 1.3)
+            effective_spill = 0 if spill_likely_gone else (disk_spill_gb + spill_gb)
+            disk_spill_per_exec = effective_spill / max(max_exec, 1)
+            if max_stage_shuf_write <= 150 and disk_spill_per_exec <= 15:
                 cfg["spark.aws.serverlessStorage.enabled"] = "true"
                 cfg.pop("spark.emr-serverless.executor.disk", None)
                 cfg.pop("spark.emr-serverless.executor.disk.type", None)
