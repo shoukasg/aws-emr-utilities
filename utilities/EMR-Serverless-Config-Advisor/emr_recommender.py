@@ -356,10 +356,22 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         }
         
         # Build Spark configs
+        def _driver_sizing(partitions, max_exec, shuffle_gb):
+            """Scale driver based on coordination overhead."""
+            if partitions > 10000 or max_exec > 200 or shuffle_gb > 10000:
+                return 16, 100
+            elif partitions > 2000 or max_exec > 100 or shuffle_gb > 2000:
+                return 8, 54
+            elif partitions > 500 or max_exec > 50 or shuffle_gb > 500:
+                return 4, 28
+            else:
+                return 4, 14
+
         def build_spark_cfg(max_exec, min_exec, sp, executor_disk):
+            d_cores, d_mem = _driver_sizing(sp, max_exec, s_in_gb + s_out_gb)
             cfg = {
-                "spark.driver.cores": str(min(4, worker_cfg["vcpu"])),
-                "spark.driver.memory": f"{min(14, worker_cfg['memory'])}G",
+                "spark.driver.cores": str(d_cores),
+                "spark.driver.memory": f"{d_mem}G",
                 "spark.executor.cores": str(worker_cfg["vcpu"]),
                 "spark.executor.memory": f"{worker_cfg['memory']}g",
                 "spark.dynamicAllocation.enabled": "true",
