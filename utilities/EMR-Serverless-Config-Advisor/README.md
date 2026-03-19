@@ -162,9 +162,9 @@ Each app produces a JSON with these sections:
 
 | Mode | Strategy | Best For |
 |------|----------|----------|
-| Cost | Conservative scaling (0.5–1.5× base) | Dev/test, budget workloads |
-| Performance | Aggressive scaling for memory-stressed jobs | Production SLA-critical |
-| IO-Optimized | Smaller workers, more disks for shuffle-bound jobs | Jobs with >50% shuffle fetch wait |
+| Cost | Conservative scaling (0.5–1.5× base); for IO-bound jobs (>50% shuffle fetch wait), automatically uses smaller workers with more disks | Dev/test, budget workloads |
+| Performance | Aggressive scaling for memory-stressed jobs; for IO-bound jobs, uses smaller workers scaled to perf executor count | Production SLA-critical |
+| IO-Optimized | Dedicated IO output with IOPS-based disk calculation for shuffle-bound jobs | Separate `--output-io` file for comparison |
 
 ## Write to Iceberg Table
 
