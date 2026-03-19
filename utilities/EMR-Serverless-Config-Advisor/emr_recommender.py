@@ -230,7 +230,7 @@ def _get_iceberg_configs() -> Dict[str, str]:
 
 def generate_dual_recommendations(input_path: str, limit: int = 100,
                                   target_partition_size_mib: int = 1024,
-                                  serverless_storage: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                                  serverless_storage: bool = False) -> Tuple[List[Dict], List[Dict]]:
     """Generate cost, performance, and IO-optimized recommendations."""
     
     # Load metrics
@@ -280,7 +280,6 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
     
     cost_recs = []
     perf_recs = []
-    io_recs = []
     
     # Process applications with input data
     for _, row in df_with_data.iterrows():
@@ -536,7 +535,6 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
                 },
             })
             worker_cfg, worker_type = saved_cfg, saved_type
-            io_recs.append(io_rec)
             # For IO-bound jobs, the IO config IS the cost-efficient config
             # (the standard cost rec would just fail again)
             cost_recs[-1] = dict(io_rec)
@@ -600,11 +598,10 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
         
         cost_recs.append(minimal_rec)
         perf_recs.append(minimal_rec)
-        io_recs.append(minimal_rec)
     
-    log.info("Generated %d cost, %d performance, %d io-optimized recommendations",
-             len(cost_recs), len(perf_recs), len(io_recs))
-    return cost_recs, perf_recs, io_recs
+    log.info("Generated %d cost, %d performance recommendations",
+             len(cost_recs), len(perf_recs))
+    return cost_recs, perf_recs
 
 
 if __name__ == "__main__":
@@ -618,7 +615,6 @@ if __name__ == "__main__":
                         help="Target shuffle partition size in MiB (default: 1024 = 1GB)")
     parser.add_argument("--output-cost", default="recommendations_cost_optimized.json", help="Cost output file")
     parser.add_argument("--output-perf", default="recommendations_performance_optimized.json", help="Performance output file")
-    parser.add_argument("--output-io", default="recommendations_io_optimized.json", help="IO-optimized output file")
     parser.add_argument("--format-job-config", action="store_true",
                         help="Format output to job configuration format")
     parser.add_argument("--cost-optimized", action="store_true",
@@ -635,7 +631,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Generate recommendations
-    cost_recs, perf_recs, io_recs = generate_dual_recommendations(
+    cost_recs, perf_recs = generate_dual_recommendations(
         args.input_path,
         args.limit,
         args.target_partition_size,
@@ -694,10 +690,6 @@ if __name__ == "__main__":
         else:
             Path(args.output_perf).write_text(json.dumps(perf_recs, indent=2))
             log.info("Performance-optimized recommendations written to %s", args.output_perf)
-    
-    # Write IO-optimized recommendations
-    Path(args.output_io).write_text(json.dumps(io_recs, indent=2))
-    log.info("IO-optimized recommendations written to %s", args.output_io)
 
     # Write to Iceberg table if requested
     if args.write_to_iceberg_table:
