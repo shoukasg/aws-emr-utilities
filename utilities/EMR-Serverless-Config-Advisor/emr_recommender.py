@@ -537,6 +537,10 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
             })
             worker_cfg, worker_type = saved_cfg, saved_type
             io_recs.append(io_rec)
+            # For IO-bound jobs, the IO config IS the cost-efficient config
+            # (the standard cost rec would just fail again)
+            cost_recs[-1] = dict(io_rec)
+            cost_recs[-1]["optimization_mode"] = "cost"
         # No IO rec for non-IO-bound jobs or already-Small workers
     
     # Process applications with no input data - recommend minimal config
