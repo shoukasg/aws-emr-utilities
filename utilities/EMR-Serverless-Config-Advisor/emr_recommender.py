@@ -470,8 +470,30 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
             "Medium": {"vcpu": 8,  "min_mem": 16, "max_mem": 54, "mem_step": 4},
             "Large":  {"vcpu": 16, "min_mem": 64, "max_mem": 108, "mem_step": 8},
         }
-        io_mult = 4 if shuffle_fetch_wait_pct > 80 else 2 if shuffle_fetch_wait_pct > 50 else 0
-        io_target = DOWNSIZE_MAP.get((worker_type, io_mult))
+        io_mult = 0
+        io_target = None
+        if shuffle_fetch_wait_pct > 50:
+            # IOPS-based: 5 MB/s effective per disk for shuffle random IO
+            # Target: shuffle IO completes within 30% of job duration
+            dur_sec = duration * 3600
+            total_shuf_mb = (s_in_gb + s_out_gb) * 1024
+            target_sec = dur_sec * 0.3
+            if target_sec > 0:
+                disks_needed = int(total_shuf_mb / (5 * target_sec) + 0.5)
+            else:
+                disks_needed = max_exec_cost
+            # Cap at 4x cost executors (Large->Small is max downsize)
+            io_exec_target = max(max_exec_cost, min(max_exec_cost * 4, disks_needed))
+            io_mult = max(1, round(io_exec_target / max_exec_cost)) if max_exec_cost > 0 else 0
+            io_mult = min(io_mult, 4)  # cap at 4x
+            io_target = DOWNSIZE_MAP.get((worker_type, io_mult))
+            # If exact mult not in map, try lower
+            if not io_target and io_mult > 2:
+                io_target = DOWNSIZE_MAP.get((worker_type, 4)) or DOWNSIZE_MAP.get((worker_type, 2))
+                io_mult = 4 if DOWNSIZE_MAP.get((worker_type, 4)) else 2
+            elif not io_target and io_mult > 1:
+                io_target = DOWNSIZE_MAP.get((worker_type, 2))
+                io_mult = 2
         if io_mult and io_target:
             io_type = io_target
             io_r = WORKER_RANGES_IO[io_type]
