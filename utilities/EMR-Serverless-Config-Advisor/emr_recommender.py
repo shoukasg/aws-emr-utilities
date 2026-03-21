@@ -549,16 +549,46 @@ def generate_dual_recommendations(input_path: str, limit: int = 100,
             # For IO-bound jobs, the IO config IS the cost-efficient config
             cost_recs[-1] = dict(io_rec)
             cost_recs[-1]["optimization_mode"] = "cost"
-            # Perf mode keeps original large workers for more vCPU per executor,
-            # but must have at least as many disks (executors) as cost mode.
+            # Perf mode: keep large workers if they already have enough disks.
+            # Otherwise, find the largest worker type that meets the disk target
+            # while preserving total core count.
             if max_exec_perf < io_max:
-                max_exec_perf = io_max
-                min_exec_perf = max(1, max_exec_perf // 2)
-                perf_recs[-1]["worker"]["max_executors"] = max_exec_perf
-                perf_recs[-1]["worker"]["min_executors"] = min_exec_perf
-                perf_recs[-1]["worker"]["total_vcpu_capacity"] = max_exec_perf * worker_cfg["vcpu"]
-                perf_recs[-1]["worker"]["total_memory_capacity"] = max_exec_perf * worker_cfg["memory"]
-                perf_recs[-1]["spark_configs"] = build_spark_cfg(max_exec_perf, min_exec_perf, sp_perf, executor_disk_perf)
+                perf_orig_cores = max_exec_perf * worker_cfg["vcpu"]
+                # Try each size from Large down — pick the biggest that has enough disks
+                best = None
+                for try_type in ["Large", "Medium", "Small"]:
+                    tr = WORKER_RANGES_IO[try_type]
+                    need_exec = io_max  # must match cost disk count
+                    total_cores = need_exec * tr["vcpu"]
+                    if total_cores >= perf_orig_cores:
+                        # This size gives enough disks AND enough cores
+                        per_task_mem = worker_cfg["memory"] / worker_cfg["vcpu"]
+                        tmem = int(per_task_mem * tr["vcpu"])
+                        tmem = max(tr["min_mem"], min(tr["max_mem"], tmem))
+                        tmem = tmem - (tmem - tr["min_mem"]) % tr["mem_step"] if tmem < tr["max_mem"] else tr["max_mem"]
+                        best = (try_type, tr, need_exec, tmem)
+                        break
+                if best:
+                    btype, br, bexec, bmem = best
+                    bmin = max(1, bexec // 2)
+                    perf_recs[-1]["worker"] = {
+                        "type": btype, "vcpu": br["vcpu"], "memory_gb": bmem,
+                        "max_executors": bexec, "min_executors": bmin,
+                        "total_vcpu_capacity": bexec * br["vcpu"],
+                        "total_memory_capacity": bexec * bmem,
+                    }
+                    perf_recs[-1]["spark_configs"] = build_spark_cfg(
+                        bexec, bmin, sp_perf, executor_disk_perf,
+                        vcpu_override=br["vcpu"], mem_override=bmem)
+                else:
+                    # Fallback: inflate original workers to match disk count
+                    max_exec_perf = io_max
+                    min_exec_perf = max(1, max_exec_perf // 2)
+                    perf_recs[-1]["worker"]["max_executors"] = max_exec_perf
+                    perf_recs[-1]["worker"]["min_executors"] = min_exec_perf
+                    perf_recs[-1]["worker"]["total_vcpu_capacity"] = max_exec_perf * worker_cfg["vcpu"]
+                    perf_recs[-1]["worker"]["total_memory_capacity"] = max_exec_perf * worker_cfg["memory"]
+                    perf_recs[-1]["spark_configs"] = build_spark_cfg(max_exec_perf, min_exec_perf, sp_perf, executor_disk_perf)
         # No IO rec for non-IO-bound jobs or already-Small workers
     
     # Process applications with no input data - recommend minimal config
