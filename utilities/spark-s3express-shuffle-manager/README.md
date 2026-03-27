@@ -148,7 +148,6 @@ Benchmarked with TPC-DS 3TB on EMR 7.12.0 (4× m7g.12xlarge, 47 executors):
 | Shuffle Backend | Iter 1 | Iter 2 | Iter 3 | Spot Resilient |
 |-----------------|--------|--------|--------|----------------|
 | Local EBS gp2 (default) | 15.7 min | 15.7 min | 15.7 min | ❌ |
-| S3 Express ShuffleDataIO | 37 min | 37 min | 37 min | ❌ |
 | **S3 Express ShuffleManager** | **30.8 min** | **29.7 min** | **30.6 min** | **✅** |
 
 ### Spot Resilience Test
