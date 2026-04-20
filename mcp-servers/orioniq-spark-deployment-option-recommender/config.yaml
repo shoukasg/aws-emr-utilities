@@ -3,13 +3,13 @@
 
 # AWS Configuration
 aws:
-  region: "us-west-2"
-  emr_cluster_arn: "arn:aws:elasticmapreduce:us-west-2:964888361164:cluster/j-2G6747K4S23GY"
-  emr_cluster_id: "j-2G6747K4S23GY"
+  region: "us-east-1"
+  emr_cluster_arn: ""
+  emr_cluster_id: ""
 
 # Spark History Server MCP Configuration
 spark_history_mcp:
-  path: "/Users/syedair/Documents/All Docs/AWS_Work/Development/mcp-apache-spark-history-server"
+  path: ""
   startup_timeout: 120
 
 # LLM Model Configuration
@@ -35,7 +35,7 @@ app:
   mcp_log_level: "INFO"
 
   # Default values for testing
-  default_application_id: "application_1756285766062_0001"
+  default_application_id: ""
 
   # File naming
   timestamp_format: "%Y%m%d_%H%M%S"
