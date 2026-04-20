@@ -121,7 +121,7 @@ def analyze_cluster_patterns(cluster_id: str, region: str) -> Dict[str, Any]:
     """Analyze EMR cluster usage patterns.
     
     Args:
-        cluster_id: EMR cluster identifier (e.g., 'j-2G6747K4S23GY')
+        cluster_id: EMR cluster identifier (e.g., 'j-XXXXXXXXXXXXX')
         region: AWS region (e.g., 'us-west-2')
         
     Returns:

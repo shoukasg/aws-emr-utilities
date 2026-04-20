@@ -58,7 +58,7 @@ def load_config(config_path=None):
     default_config = {
         'aws': {
             'region': 'us-west-2',
-            'emr_cluster_id': 'j-2G6747K4S23GY'
+            'emr_cluster_id': ''
         },
         'llm': {
             'model_id': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
@@ -637,16 +637,8 @@ class KnowledgeProcessor:
                             text_file.write(f"--- PAGE {page_num + 1} ---\n{text}\n\n")
                 return output_path
             except ImportError:
-                # Try to install PyPDF2
-                subprocess.run(['pip', 'install', 'PyPDF2'], check=True)
-                import PyPDF2
-                with open(pdf_path, 'rb') as pdf_file, open(output_path, 'w', encoding='utf-8') as text_file:
-                    pdf_reader = PyPDF2.PdfReader(pdf_file)
-                    for page_num, page in enumerate(pdf_reader.pages):
-                        text = page.extract_text()
-                        if text:
-                            text_file.write(f"--- PAGE {page_num + 1} ---\n{text}\n\n")
-                return output_path
+                logger.error("PyPDF2 not installed. Install with: uv add pypdf2")
+                return None
                 
         except Exception as e:
             logger.error(f"Error converting PDF to text: {e}")
@@ -1243,17 +1235,29 @@ class EMRPatternAnalyzer:
             return 0.1
         
         try:
-            creation = datetime.fromisoformat(timeline['CreationDateTime'].replace('Z', '+00:00'))
-            end_time = datetime.fromisoformat(timeline['EndDateTime'].replace('Z', '+00:00'))
-            total_runtime = (end_time - creation).total_seconds()
+            creation = timeline.get('CreationDateTime')
+            end_time_val = timeline.get('EndDateTime')
+            if not creation or not end_time_val:
+                return 0.1
+            
+            if isinstance(creation, str):
+                creation = datetime.fromisoformat(creation.replace('Z', '+00:00'))
+            if isinstance(end_time_val, str):
+                end_time_val = datetime.fromisoformat(end_time_val.replace('Z', '+00:00'))
+            
+            total_runtime = (end_time_val - creation).total_seconds()
             
             active_time = 0
             for step in steps:
                 step_timeline = step.get('Status', {}).get('Timeline', {})
-                if 'StartDateTime' in step_timeline and 'EndDateTime' in step_timeline:
-                    start = datetime.fromisoformat(step_timeline['StartDateTime'].replace('Z', '+00:00'))
-                    end = datetime.fromisoformat(step_timeline['EndDateTime'].replace('Z', '+00:00'))
-                    active_time += (end - start).total_seconds()
+                s_start = step_timeline.get('StartDateTime')
+                s_end = step_timeline.get('EndDateTime')
+                if s_start and s_end:
+                    if isinstance(s_start, str):
+                        s_start = datetime.fromisoformat(s_start.replace('Z', '+00:00'))
+                    if isinstance(s_end, str):
+                        s_end = datetime.fromisoformat(s_end.replace('Z', '+00:00'))
+                    active_time += (s_end - s_start).total_seconds()
             
             efficiency = active_time / total_runtime if total_runtime > 0 else 0
             return min(efficiency, 1.0)
@@ -1269,17 +1273,30 @@ class EMRPatternAnalyzer:
             return 90.0
         
         try:
-            creation = datetime.fromisoformat(timeline['CreationDateTime'].replace('Z', '+00:00'))
-            end_time = datetime.fromisoformat(timeline['EndDateTime'].replace('Z', '+00:00'))
-            total_runtime = (end_time - creation).total_seconds()
+            creation = timeline.get('CreationDateTime')
+            end_time_val = timeline.get('EndDateTime')
+            if not creation or not end_time_val:
+                return 90.0
+            
+            # boto3 returns datetime objects, not strings
+            if isinstance(creation, str):
+                creation = datetime.fromisoformat(creation.replace('Z', '+00:00'))
+            if isinstance(end_time_val, str):
+                end_time_val = datetime.fromisoformat(end_time_val.replace('Z', '+00:00'))
+            
+            total_runtime = (end_time_val - creation).total_seconds()
             
             active_time = 0
             for step in steps:
                 step_timeline = step.get('Status', {}).get('Timeline', {})
-                if 'StartDateTime' in step_timeline and 'EndDateTime' in step_timeline:
-                    start = datetime.fromisoformat(step_timeline['StartDateTime'].replace('Z', '+00:00'))
-                    end = datetime.fromisoformat(step_timeline['EndDateTime'].replace('Z', '+00:00'))
-                    active_time += (end - start).total_seconds()
+                s_start = step_timeline.get('StartDateTime')
+                s_end = step_timeline.get('EndDateTime')
+                if s_start and s_end:
+                    if isinstance(s_start, str):
+                        s_start = datetime.fromisoformat(s_start.replace('Z', '+00:00'))
+                    if isinstance(s_end, str):
+                        s_end = datetime.fromisoformat(s_end.replace('Z', '+00:00'))
+                    active_time += (s_end - s_start).total_seconds()
             
             idle_percentage = ((total_runtime - active_time) / total_runtime) * 100 if total_runtime > 0 else 90.0
             return min(idle_percentage, 99.9)
@@ -1320,7 +1337,7 @@ class UnifiedRecommendationEngine:
         workload_description: str,
         cluster_ids: Optional[List[str]] = None,
         event_log_paths: Optional[List[str]] = None,
-        region: str = 'eu-west-1',
+        region: str = 'us-east-1',
         profile_name: Optional[str] = "default",
         has_kubernetes_experience: bool = False
     ) -> UnifiedRecommendation:
@@ -1803,7 +1820,48 @@ class UnifiedRecommendationEngine:
 
 # Initialize global components
 unified_engine = UnifiedRecommendationEngine()
-_planning_completed = False
+
+# Workflow state machine — enforces tool call order
+_workflow_state = {
+    'plan_generated': False,
+    'context_collected': False,
+    'spark_analyzed': False,
+    'cluster_analyzed': False,
+}
+
+# Shared data between tools — eliminates agent marshalling non-determinism
+_workflow_data = {
+    'spark_applications': [],   # set by analyze_cluster_patterns
+    'raw_executors': [],        # set by analyze_cluster_patterns
+    'cluster_data': {},         # set by analyze_cluster_patterns
+    'spark_data': {},           # set by analyze_spark_job_config
+}
+
+def _check_workflow(required_steps: List[str], current_tool: str) -> Optional[Dict[str, Any]]:
+    """Check if prerequisite workflow steps have been completed. Returns error dict or None."""
+    missing = [s for s in required_steps if not _workflow_state.get(s)]
+    if not missing:
+        return None
+    
+    step_to_tool = {
+        'plan_generated': 'generate_analysis_plan()',
+        'context_collected': 'collect_workload_context(preferences=[...])',
+        'spark_analyzed': 'analyze_spark_job_config()',
+        'cluster_analyzed': 'analyze_cluster_patterns()',
+    }
+    missing_tools = [step_to_tool[s] for s in missing]
+    return {
+        'status': 'error',
+        'message': f'Cannot call {current_tool} yet. Required prerequisite(s) not completed: {", ".join(missing_tools)}',
+        'workflow_order': [
+            '1. generate_analysis_plan() — present plan and get user priorities',
+            '2. collect_workload_context(preferences=[...]) — gather context with user priorities',
+            '3. analyze_spark_job_config() — extract Spark job configuration',
+            '4. analyze_cluster_patterns() — analyze cluster utilization',
+            '5. get_emr_pricing() — calculate costs and produce recommendation',
+        ],
+        'current_state': {k: v for k, v in _workflow_state.items()},
+    }
 
 @mcp.tool()
 def generate_analysis_plan(
@@ -1811,7 +1869,7 @@ def generate_analysis_plan(
     cluster_ids: Optional[List[str]] = None,
     application_ids: Optional[List[str]] = None,
     event_log_paths: Optional[List[str]] = None,
-    region: str = 'eu-west-1',
+    region: str = 'us-east-1',
     has_kubernetes_experience: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -1829,6 +1887,17 @@ def generate_analysis_plan(
         region: AWS region
         has_kubernetes_experience: K8s expertise available
     """
+    # Reset all state from previous analysis — critical for multi-analysis sessions
+    for k in _workflow_state:
+        _workflow_state[k] = False
+    _workflow_data.clear()
+    _workflow_data.update({
+        'spark_applications': [],
+        'raw_executors': [],
+        'cluster_data': {},
+        'spark_data': {},
+    })
+
     steps = []
     steps.append("1️⃣ Collect workload context and knowledge base insights")
 
@@ -1845,7 +1914,7 @@ def generate_analysis_plan(
 
     steps.append("4️⃣ Calculate real-time pricing and produce evidence-based recommendation")
 
-    return {
+    plan = {
         'status': 'plan_ready',
         'message': 'Please review the analysis plan below and confirm your priorities before I proceed.',
         'analysis_plan': {
@@ -1871,6 +1940,9 @@ def generate_analysis_plan(
         },
         'note': 'After you confirm, I will run the 4 analysis steps and produce an evidence-based recommendation with your priorities factored into the scoring weights.',
     }
+
+    _workflow_state['plan_generated'] = True
+    return plan
 
 @mcp.tool()
 def load_knowledge_sources() -> Dict[str, Any]:
@@ -1975,6 +2047,13 @@ def analyze_cluster_patterns(
     Returns:
         Cluster analysis with timing, utilization, and deployment pattern insights
     """
+    # Enforce workflow order
+    workflow_error = _check_workflow(['plan_generated', 'context_collected'], 'analyze_cluster_patterns')
+    if workflow_error:
+        return workflow_error
+
+    _workflow_state['cluster_analyzed'] = True
+
     if not cluster_ids:
         return {
             'status': 'success',
@@ -2030,8 +2109,9 @@ def analyze_cluster_patterns(
 
             cluster_runtime_hours = 0
             bootstrapping_minutes = 0
-            if creation_time and end_time:
-                cluster_runtime_hours = (end_time - creation_time).total_seconds() / 3600
+            effective_end_time = end_time or datetime.now(creation_time.tzinfo) if creation_time else None
+            if creation_time and effective_end_time:
+                cluster_runtime_hours = (effective_end_time - creation_time).total_seconds() / 3600
             if creation_time and ready_time:
                 bootstrapping_minutes = (ready_time - creation_time).total_seconds() / 60
 
@@ -2051,12 +2131,133 @@ def analyze_cluster_patterns(
             type_counts = Counter(i.get('InstanceType', '') for i in instances)
             primary_instance_type = type_counts.most_common(1)[0][0] if type_counts else 'unknown'
 
+            # Per-instance runtime for accurate per-second billing
+            instance_runtime_details = []
+            now = datetime.utcnow().replace(tzinfo=creation_time.tzinfo) if creation_time else None
+            for inst in instances:
+                inst_tl = inst.get('Status', {}).get('Timeline', {})
+                inst_start = inst_tl.get('CreationDateTime')
+                inst_end = inst_tl.get('EndDateTime') or end_time or now
+                inst_hrs = (inst_end - inst_start).total_seconds() / 3600 if inst_start and inst_end else cluster_runtime_hours
+                instance_runtime_details.append({
+                    'instance_type': inst.get('InstanceType', primary_instance_type),
+                    'market': inst.get('Market', 'ON_DEMAND'),
+                    'runtime_hours': round(inst_hrs, 4),
+                })
+
             # Multi-AZ check
             azs = set(i.get('Ec2InstanceAttributes', {}).get('AvailabilityZone', '') for i in instances if i.get('Ec2InstanceAttributes'))
             if not azs:
                 azs = set(i.get('AvailabilityZone', '') for i in instances)
 
             normalized_hours = cluster_info.get('NormalizedInstanceHours', 0)
+
+            # Discover Spark application IDs from step stderr logs in S3
+            discovered_app_ids = []
+            log_uri = cluster_info.get('LogUri', '')
+            if log_uri and steps:
+                try:
+                    import gzip
+                    s3_log_base = log_uri.replace('s3n://', 's3://').rstrip('/')
+                    s3_parts = s3_log_base.replace('s3://', '').split('/', 1)
+                    log_bucket = s3_parts[0]
+                    log_prefix = s3_parts[1] if len(s3_parts) > 1 else ''
+
+                    s3_client = boto3.client('s3', region_name=region)
+                    for step in steps:
+                        step_id = step.get('Id', '')
+                        if not step_id or step.get('Status', {}).get('State') != 'COMPLETED':
+                            continue
+                        stderr_key = f"{log_prefix}/{cluster_id}/steps/{step_id}/stderr.gz"
+                        try:
+                            resp = s3_client.get_object(Bucket=log_bucket, Key=stderr_key)
+                            text = gzip.decompress(resp['Body'].read()).decode('utf-8', errors='ignore')
+                            app_ids = re.findall(r'(application_\d+_\d+)', text)
+                            if app_ids:
+                                discovered_app_ids.append({
+                                    'step_id': step_id,
+                                    'step_name': step.get('Name', ''),
+                                    'application_id': sorted(set(app_ids))[0],
+                                })
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"Failed to discover application IDs from logs: {e}")
+
+            # Fetch Spark executor data directly via EMR Persistent App UI REST API
+            # This eliminates agent marshalling non-determinism
+            spark_applications_data = []
+            all_raw_executors = []
+            if discovered_app_ids:
+                try:
+                    from urllib.parse import urlparse as _urlparse
+                    cluster_arn = cluster_info.get('ClusterArn', '')
+                    try:
+                        ui_resp = emr_client.create_persistent_app_ui(TargetResourceArn=cluster_arn, Tags=[])
+                        ui_id = ui_resp['PersistentAppUIId']
+                        logger.info(f"Persistent App UI created/found: {ui_id}")
+                    except Exception as e:
+                        ui_id = f"p-{cluster_id[2:]}"
+                        logger.info(f"Using convention UI ID: {ui_id} (create error: {str(e)[:100]})")
+
+                    url_resp = emr_client.get_persistent_app_ui_presigned_url(PersistentAppUIId=ui_id, PersistentAppUIType='SHS')
+                    presigned_url = url_resp.get('PresignedURL', '')
+                    if presigned_url:
+                        shs_session = requests.Session()
+                        init_resp = shs_session.get(presigned_url, timeout=30, allow_redirects=True)
+                        parsed_shs = _urlparse(init_resp.url)
+                        shs_base = f"{parsed_shs.scheme}://{parsed_shs.netloc}/shs/api/v1"
+                        logger.info(f"SHS base URL: {shs_base}, init status: {init_resp.status_code}")
+
+                        for app_info in discovered_app_ids:
+                            aid = app_info['application_id']
+                            try:
+                                app_resp = shs_session.get(f"{shs_base}/applications/{aid}", timeout=10)
+                                if app_resp.status_code != 200:
+                                    logger.warning(f"SHS app endpoint failed for {aid}: {app_resp.status_code}")
+                                    continue
+                                app_resp = app_resp.json()
+                                # Try allexecutors, then with attempt ID fallback
+                                exec_url = f"{shs_base}/applications/{aid}/allexecutors"
+                                exec_resp_raw = shs_session.get(exec_url, timeout=10)
+                                if exec_resp_raw.status_code != 200:
+                                    # Fallback: use attempt ID 1
+                                    exec_url = f"{shs_base}/applications/{aid}/1/allexecutors"
+                                    exec_resp_raw = shs_session.get(exec_url, timeout=10)
+                                if exec_resp_raw.status_code != 200:
+                                    logger.warning(f"SHS executor endpoint failed for {aid}: {exec_resp_raw.status_code}")
+                                    continue
+                                exec_resp = exec_resp_raw.json()
+                                all_raw_executors.extend(exec_resp)
+                                non_driver = [e for e in exec_resp if e.get('id') != 'driver']
+
+                                cores = non_driver[0].get('totalCores', 4) if non_driver else 4
+                                mem_bytes = non_driver[0].get('maxMemory', 4 * 1073741824) if non_driver else 4 * 1073741824
+                                mem_gb = round(mem_bytes / 1073741824, 1)
+
+                                # Duration from step timeline (more reliable than SHS)
+                                step_dur_min = None
+                                for step in steps:
+                                    if step.get('Id') == app_info.get('step_id'):
+                                        st = step.get('Status', {}).get('Timeline', {})
+                                        if st.get('StartDateTime') and st.get('EndDateTime'):
+                                            step_dur_min = round((st['EndDateTime'] - st['StartDateTime']).total_seconds() / 60, 2)
+                                        break
+
+                                spark_applications_data.append({
+                                    'application_id': aid,
+                                    'job_name': app_resp.get('name', app_info.get('step_name', '')),
+                                    'job_runtime_minutes': step_dur_min or round((app_resp.get('duration', 0) or 0) / 60000, 2),
+                                    'spark_executors': len(non_driver),
+                                    'spark_executor_cores': cores,
+                                    'spark_executor_memory_gb': mem_gb,
+                                    'executor_count_method': 'direct_shs_api',
+                                    'workload_characteristics': 'batch_processing',
+                                })
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch Spark data for {aid}: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to access Spark History Server via EMR API: {type(e).__name__}: {e}")
 
             cluster_result = {
                 'cluster_id': cluster_id,
@@ -2073,6 +2274,7 @@ def analyze_cluster_patterns(
                     'multi_az_deployment': len(azs) > 1,
                     'instance_count': len(instances),
                     'step_count': len(steps),
+                    'instance_runtime_details': instance_runtime_details,
                 },
                 'pattern_analysis': {
                     'job_type': pattern.job_type.value,
@@ -2088,7 +2290,10 @@ def analyze_cluster_patterns(
                     'name': cluster_info.get('Name', ''),
                     'state': cluster_info.get('Status', {}).get('State', ''),
                     'release_label': cluster_info.get('ReleaseLabel', ''),
-                }
+                },
+                'discovered_application_ids': discovered_app_ids,
+                'spark_applications': spark_applications_data,
+                'raw_executors': all_raw_executors,
             }
             all_cluster_results.append(cluster_result)
 
@@ -2103,13 +2308,26 @@ def analyze_cluster_patterns(
     # Aggregate if multiple clusters
     primary = all_cluster_results[0] if all_cluster_results else {}
 
+    # Store in shared workflow data — analyze_spark_job_config reads from here
+    _workflow_data['spark_applications'] = primary.get('spark_applications', [])
+    _workflow_data['raw_executors'] = primary.get('raw_executors', [])
+    _workflow_data['cluster_data'] = {
+        'timing_analysis': primary.get('timing_analysis', {}),
+        'cluster_analysis': primary.get('cluster_analysis', {}),
+        'pattern_analysis': primary.get('pattern_analysis', {}),
+    }
+
+    has_spark_data = bool(primary.get('spark_applications'))
+
     return {
         'status': 'success',
+        'NEXT_STEP': 'Call analyze_spark_job_config() with NO arguments.',
+        'spark_metrics_available': has_spark_data,
+        'applications_found': len(primary.get('spark_applications', [])),
         'clusters_analyzed': len(all_cluster_results),
         'timing_analysis': primary.get('timing_analysis', {}),
         'cluster_analysis': primary.get('cluster_analysis', {}),
         'pattern_analysis': primary.get('pattern_analysis', {}),
-        'analysis_details': {'clusters': all_cluster_results},
         'analysis_timestamp': datetime.utcnow().isoformat(),
     }
 
@@ -2120,7 +2338,7 @@ def collect_workload_context(
     cluster_ids: Optional[List[str]] = None,
     event_log_paths: Optional[List[str]] = None,
     application_ids: Optional[List[str]] = None,
-    region: str = 'eu-west-1',
+    region: str = 'us-east-1',
     has_kubernetes_experience: bool = False,
     compliance_requirements: Optional[List[str]] = None,
     preferences: Optional[List[str]] = None,
@@ -2142,6 +2360,11 @@ def collect_workload_context(
         preferences: e.g. ["minimize-ops", "cost-priority", "performance-priority"]
     """
     try:
+        # Enforce workflow order
+        workflow_error = _check_workflow(['plan_generated'], 'collect_workload_context')
+        if workflow_error:
+            return workflow_error
+
         # Enforce planning phase — priorities must be provided
         if not preferences:
             return {
@@ -2160,8 +2383,9 @@ def collect_workload_context(
         # Search knowledge base for relevant insights
         knowledge_results = unified_engine.knowledge_processor.search_knowledge_base(workload_description)
 
-        global _planning_completed
-        _planning_completed = True
+        _workflow_state['context_collected'] = True
+        _workflow_data['has_kubernetes_experience'] = has_kubernetes_experience
+        _workflow_data['workload_description'] = workload_description
 
         return {
             'status': 'success',
@@ -2227,7 +2451,7 @@ def analyze_spark_job_config(
     application_ids: Optional[List[str]] = None,
     history_server_url: Optional[str] = None,
     cluster_arn: Optional[str] = None,
-    region: str = 'eu-west-1',
+    region: str = 'us-east-1',
     profile_name: Optional[str] = "default",
     extracted_spark_data: Optional[Dict[str, Any]] = None  # NEW
 ) -> Dict[str, Any]:
@@ -2256,9 +2480,34 @@ def analyze_spark_job_config(
         Spark configuration analysis for use in next workflow steps
     """
     try:
+        # Enforce workflow order
+        workflow_error = _check_workflow(['plan_generated', 'context_collected'], 'analyze_spark_job_config')
+        if workflow_error:
+            return workflow_error
+
+        _workflow_state['spark_analyzed'] = True
         logger.info(f"STEP 2/4: Analyzing Spark job configuration from multiple sources")
 
-        # NEW: If agent provides extracted data, use it and mark complete
+        # Priority 1: Use pre-fetched data from _workflow_data (set by analyze_cluster_patterns)
+        # This is the deterministic path — no agent marshalling involved
+        # analyze_cluster_patterns already set per-app executor count, cores, and memory
+        # from the direct SHS API fetch — use as-is, don't overwrite
+        if _workflow_data.get('spark_applications'):
+            apps = _workflow_data['spark_applications']
+
+            result = {
+                'status': 'success',
+                'step': '2_of_4',
+                'data_source': 'workflow_state_direct_shs',
+                'workflow_complete': False,
+                'next_required_step': 'get_emr_pricing',
+                'analysis_timestamp': datetime.utcnow().isoformat(),
+                'applications_analyzed': apps,
+            }
+            _workflow_data['spark_data'] = result
+            return result
+
+        # Priority 2: If agent provides extracted data (fallback)
         if extracted_spark_data:
             # Calculate peak concurrent executors from raw executor list if provided
             apps = extracted_spark_data.get('applications_analyzed', [])
@@ -2266,13 +2515,21 @@ def analyze_spark_job_config(
             if not raw_executors and extracted_spark_data.get('applications_analyzed'):
                 return {
                     'status': 'error',
-                    'message': 'Missing raw_executors. You MUST pass the raw executor list from list_executors(app_id) or get_executor_summary(app_id) as "raw_executors" in extracted_spark_data. The tool calculates peak concurrent executors and per-executor config from this data. Do NOT set spark_executors, spark_executor_cores, or spark_executor_memory_gb yourself.',
+                    'message': 'Missing raw_executors. You MUST call list_executors(app_id, include_inactive=true) and pass the ENTIRE response as "raw_executors". Do NOT use get_executor_summary — it lacks the timeline data needed for accurate peak executor calculation.',
                     'required_format': {
                         'extracted_spark_data': {
-                            'raw_executors': '[full list from list_executors or get_executor_summary — include id, addTime, removeTime, totalCores, maxMemory, isActive for each]',
+                            'raw_executors': '[ENTIRE response from list_executors — each entry must have id, addTime, removeTime, totalCores, maxMemory]',
                             'applications_analyzed': [{'application_id': '...', 'job_name': '...', 'job_runtime_minutes': 0, 'workload_characteristics': '...'}],
                         }
                     }
+                }
+
+            # Validate that raw_executors have timeline fields (addTime) needed for sweep-line
+            non_driver = [e for e in raw_executors if e.get('id') != 'driver']
+            if non_driver and not any(e.get('addTime') for e in non_driver):
+                return {
+                    'status': 'error',
+                    'message': 'raw_executors missing addTime field. You passed data from get_executor_summary which lacks executor timelines. Call list_executors(app_id, include_inactive=true) instead and pass the ENTIRE response.',
                 }
 
             peak = _calculate_peak_concurrent_executors(raw_executors)
@@ -2492,21 +2749,24 @@ def load_region_mapping():
             'ap-southeast-1': 'Asia Pacific (Singapore)'
         }
 
-def fetch_pricing_rates(region: str) -> Dict[str, Any]:
-    """Fetch EMR/EC2/EKS pricing rates directly via boto3."""
-    # Pricing API is only available in us-east-1
+def fetch_pricing_rates(region: str, instance_types: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Fetch EMR/EC2/EKS pricing rates directly via boto3.
+    Fetches rates for each unique instance type for accurate per-instance billing."""
     pricing_client = boto3.client('pricing', region_name='us-east-1')
     
     region_mapping = load_region_mapping()
     location = region_mapping.get(region, 'US East (N. Virginia)')
     
-    # Fallback rates
+    if not instance_types:
+        instance_types = ['m5.xlarge']
+    unique_types = sorted(set(instance_types))
+    
     rates = {
         'emr_serverless': {'vcpu_hour_rate': 0.052624, 'memory_gb_hour_rate': 0.0057785},
         'emr_eks': {'vcpu_hour_rate': 0.01012, 'memory_gb_hour_rate': 0.00111125},
-        'ec2_m1_small': {'hourly_rate': 0.047},
         'eks_cluster': {'hourly_rate': 0.1},
-        'emr_ec2_uplift': {'hourly_rate': 0.011},
+        'ec2_rates': {},    # instance_type -> hourly_rate
+        'emr_rates': {},    # instance_type -> hourly_rate (EMR uplift)
     }
 
     def _extract_rate(response, usage_type_filter=None):
@@ -2542,24 +2802,32 @@ def fetch_pricing_rates(region: str) -> Dict[str, Any]:
         rates['emr_eks']['vcpu_hour_rate'] = _extract_rate(resp, 'vCPUHours') or rates['emr_eks']['vcpu_hour_rate']
         rates['emr_eks']['memory_gb_hour_rate'] = _extract_rate(resp, 'GBHours') or rates['emr_eks']['memory_gb_hour_rate']
 
-        # EC2 m1.small
-        resp = pricing_client.get_products(ServiceCode='AmazonEC2', MaxResults=1, Filters=[
-            {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': 'm1.small'},
-            {'Type': 'TERM_MATCH', 'Field': 'tenancy', 'Value': 'Shared'},
-            {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Compute Instance'},
-            {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
-            {'Type': 'TERM_MATCH', 'Field': 'operatingSystem', 'Value': 'Linux'},
-        ])
-        rates['ec2_m1_small']['hourly_rate'] = _extract_rate(resp) or rates['ec2_m1_small']['hourly_rate']
+        # Per-instance-type EC2 and EMR uplift rates
+        for itype in unique_types:
+            try:
+                resp = pricing_client.get_products(ServiceCode='AmazonEC2', MaxResults=1, Filters=[
+                    {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': itype},
+                    {'Type': 'TERM_MATCH', 'Field': 'tenancy', 'Value': 'Shared'},
+                    {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Compute Instance'},
+                    {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                    {'Type': 'TERM_MATCH', 'Field': 'operatingSystem', 'Value': 'Linux'},
+                    {'Type': 'TERM_MATCH', 'Field': 'preInstalledSw', 'Value': 'NA'},
+                    {'Type': 'TERM_MATCH', 'Field': 'capacitystatus', 'Value': 'Used'},
+                ])
+                rates['ec2_rates'][itype] = _extract_rate(resp) or 0.192
+            except Exception:
+                rates['ec2_rates'][itype] = 0.192
 
-        # EMR EC2 uplift
-        resp = pricing_client.get_products(ServiceCode='ElasticMapReduce', MaxResults=1, Filters=[
-            {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': 'm1.small'},
-            {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Elastic Map Reduce Instance'},
-            {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
-            {'Type': 'TERM_MATCH', 'Field': 'softwareType', 'Value': 'EMR'},
-        ])
-        rates['emr_ec2_uplift']['hourly_rate'] = _extract_rate(resp) or rates['emr_ec2_uplift']['hourly_rate']
+            try:
+                resp = pricing_client.get_products(ServiceCode='ElasticMapReduce', MaxResults=1, Filters=[
+                    {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': itype},
+                    {'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Elastic Map Reduce Instance'},
+                    {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+                    {'Type': 'TERM_MATCH', 'Field': 'softwareType', 'Value': 'EMR'},
+                ])
+                rates['emr_rates'][itype] = _extract_rate(resp) or 0.048
+            except Exception:
+                rates['emr_rates'][itype] = 0.048
 
         # EKS cluster
         resp = pricing_client.get_products(ServiceCode='AmazonEKS', MaxResults=1, Filters=[
@@ -2572,6 +2840,25 @@ def fetch_pricing_rates(region: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Failed to fetch some pricing data, using fallbacks: {e}")
 
+    # Fetch spot prices for each instance type
+    rates['spot_rates'] = {}
+    try:
+        ec2_client = boto3.client('ec2', region_name=region)
+        for itype in unique_types:
+            try:
+                resp = ec2_client.describe_spot_price_history(
+                    InstanceTypes=[itype],
+                    ProductDescriptions=['Linux/UNIX'],
+                    MaxResults=5,
+                )
+                prices = [float(p['SpotPrice']) for p in resp.get('SpotPriceHistory', [])]
+                if prices:
+                    rates['spot_rates'][itype] = min(prices)  # cheapest AZ
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Failed to fetch spot prices: {e}")
+
     rates['region'] = region
     rates['location'] = location
     return rates
@@ -2581,6 +2868,7 @@ def _build_evidence_based_recommendation(
     spark_data: Dict[str, Any],
     cluster_data: Dict[str, Any],
     utilization: float,
+    has_kubernetes_experience: bool = False,
 ) -> Dict[str, Any]:
     """
     Final evidence-based recommendation combining cost, workload fit, operational fit, and constraints.
@@ -2654,12 +2942,26 @@ def _build_evidence_based_recommendation(
 
     # --- Constraint score (10% weight) — from user context ---
     constraint_scores = {'EMR Serverless': 50, 'EMR on EC2': 50, 'EMR on EKS': 50}
-    # Constraints are passed through the agent's context, not directly here
-    # The agent applies constraint reasoning on top of this recommendation
+    if not has_kubernetes_experience:
+        constraint_scores['EMR on EKS'] = 0
+        evidence['EMR on EKS'].append("No Kubernetes experience — significant operational risk")
 
     # --- Weighted final score ---
     final_scores = {}
     for opt in total_by_option:
+        final_scores[opt] = round(
+            cost_scores.get(opt, 50) * 0.4 +
+            workload_scores.get(opt, 50) * 0.3 +
+            ops_scores.get(opt, 50) * 0.2 +
+            constraint_scores.get(opt, 50) * 0.1,
+            1
+        )
+
+    # Hard constraint: if no K8s experience, cap EKS score below EC2 and Serverless
+    if not has_kubernetes_experience and 'EMR on EKS' in final_scores:
+        other_scores = [s for o, s in final_scores.items() if o != 'EMR on EKS']
+        if other_scores:
+            final_scores['EMR on EKS'] = min(final_scores['EMR on EKS'], min(other_scores) - 1)
         final_scores[opt] = round(
             cost_scores.get(opt, 50) * 0.4 +
             workload_scores.get(opt, 50) * 0.3 +
@@ -2742,11 +3044,16 @@ def get_emr_pricing(
             }
         region: AWS region for pricing lookup
     """
-    if not _planning_completed:
-        return {
-            'status': 'error',
-            'message': 'Analysis plan not completed. Call generate_analysis_plan() first, get user priorities, then call collect_workload_context(preferences=[...]) before running pricing.',
-        }
+    # Enforce workflow order
+    workflow_error = _check_workflow(['plan_generated', 'context_collected', 'spark_analyzed', 'cluster_analyzed'], 'get_emr_pricing')
+    if workflow_error:
+        return workflow_error
+
+    # Read from shared workflow data if agent didn't pass args
+    if not extracted_spark_data and _workflow_data.get('spark_data'):
+        extracted_spark_data = _workflow_data['spark_data']
+    if not extracted_cluster_data and _workflow_data.get('cluster_data'):
+        extracted_cluster_data = _workflow_data['cluster_data']
 
     if not extracted_spark_data or not extracted_cluster_data:
         return {'status': 'error', 'message': 'Missing data from previous steps (need extracted_spark_data and extracted_cluster_data)'}
@@ -2756,27 +3063,108 @@ def get_emr_pricing(
 
     region = region or CONFIG.get('aws', {}).get('region', 'us-west-2')
 
-    # Fetch real-time pricing — ONE call, no relay
-    rates = fetch_pricing_rates(region)
-
     applications = extracted_spark_data.get('applications_analyzed', [])
     timing = extracted_cluster_data.get('timing_analysis', {})
     cluster = extracted_cluster_data.get('cluster_analysis', {})
 
-    cluster_runtime_hours = timing.get('cluster_runtime_hours', 8.0)
-    normalized_instance_hours = timing.get('normalized_instance_hours', 0)
+    cluster_runtime_hours = timing.get('cluster_runtime_hours', 0)
+    instance_count = cluster.get('instance_count', 0)
+
+    # If no real cluster data, estimate from Spark executor metrics
+    estimated_cluster = False
+    if not instance_count and applications:
+        estimated_cluster = True
+        # Find peak executors and their resource requirements
+        max_executors = max((a.get('spark_executors', 1) for a in applications), default=1)
+        max_cores = max((a.get('spark_executor_cores', 4) for a in applications), default=4)
+        max_mem_gb = max((a.get('spark_executor_memory_gb', 16) for a in applications), default=16)
+
+        # Pick instance type that fits executors efficiently
+        # Try each size and pick the one with best packing (most executors per instance)
+        instance_options = [
+            ('m5.xlarge',  3, 14),    # 4 vCPU, 16GB → ~3 usable cores, ~14GB
+            ('m5.2xlarge', 7, 30),    # 8 vCPU, 32GB → ~7 usable cores, ~30GB
+            ('m5.4xlarge', 15, 60),   # 16 vCPU, 64GB → ~15 usable cores, ~60GB
+            ('m5.8xlarge', 31, 124),  # 32 vCPU, 128GB → ~31 usable cores, ~124GB
+        ]
+
+        best_type, best_epi, best_cores, best_mem = 'm5.4xlarge', 1, 15, 60
+        for itype, uc, um in instance_options:
+            epc = uc // max_cores
+            epm = int(um // max_mem_gb)
+            epi = min(epc, epm)
+            if epi >= 2:  # Good packing — at least 2 executors per instance
+                best_type, best_epi, best_cores, best_mem = itype, epi, uc, um
+                break
+            elif epi >= 1 and best_epi < epi:
+                best_type, best_epi, best_cores, best_mem = itype, epi, uc, um
+
+        estimated_instance_type = best_type
+        executors_per_instance = max(1, best_epi)
+        core_instances = -(-max_executors // executors_per_instance)  # ceiling division
+        instance_count = core_instances + 1  # +1 for master
+
+        # Estimate runtime from longest job + bootstrap overhead
+        max_job_minutes = max((a.get('job_runtime_minutes', 60) for a in applications), default=60)
+        total_job_minutes = sum(a.get('job_runtime_minutes', 60) for a in applications)
+        cluster_runtime_hours = (total_job_minutes + 5) / 60  # +5 min bootstrap
+
+        cluster['instance_type'] = estimated_instance_type
+        cluster['instance_count'] = instance_count
+
+    cluster_runtime_hours = cluster_runtime_hours or timing.get('cluster_runtime_hours', 8.0)
+
+    # Fetch real-time pricing for all instance types in the cluster
+    instance_details = cluster.get('instance_runtime_details', [])
+    all_instance_types = [d['instance_type'] for d in instance_details] if instance_details else [cluster.get('instance_type', 'm5.xlarge')]
+    rates = fetch_pricing_rates(region, instance_types=all_instance_types)
 
     # Rate extraction
     sls_vcpu = rates['emr_serverless']['vcpu_hour_rate']
     sls_mem = rates['emr_serverless']['memory_gb_hour_rate']
-    ec2_rate = rates['ec2_m1_small']['hourly_rate']
-    emr_uplift = rates['emr_ec2_uplift']['hourly_rate']
     eks_cluster_rate = rates['eks_cluster']['hourly_rate']
     eks_vcpu = rates['emr_eks']['vcpu_hour_rate']
     eks_mem = rates['emr_eks']['memory_gb_hour_rate']
 
-    total_ec2_cost = ec2_rate * normalized_instance_hours
-    total_emr_uplift = emr_uplift * normalized_instance_hours
+    # === COST BUILDING BLOCKS ===
+    # EMR bills per-second (1-min minimum).
+    # We calculate raw EC2 cost and EMR EC2 uplift separately so EKS can use EC2 cost without EMR EC2 uplift.
+
+    instance_details = cluster.get('instance_runtime_details', [])
+
+    # 1. Raw EC2 instance cost (on-demand) — used by both EC2 and EKS
+    total_ec2_cost = 0
+    # 2. EMR EC2 uplift — only for EMR on EC2, NOT for EKS
+    total_emr_ec2_uplift = 0
+    # 3. Raw EC2 instance cost (spot) — used by both EC2 spot and EKS spot
+    total_ec2_spot_cost = 0
+
+    if instance_details:
+        for inst in instance_details:
+            itype = inst['instance_type']
+            hrs = inst['runtime_hours']
+            ec2_rate = rates['ec2_rates'].get(itype, 0.192)
+            emr_rate = rates['emr_rates'].get(itype, 0.048)
+            spot_rate = rates.get('spot_rates', {}).get(itype, ec2_rate)
+            total_ec2_cost += ec2_rate * hrs
+            total_emr_ec2_uplift += emr_rate * hrs
+            total_ec2_spot_cost += spot_rate * hrs
+    else:
+        primary_type = cluster.get('instance_type', 'm5.xlarge')
+        ec2_rate = rates['ec2_rates'].get(primary_type, 0.192)
+        emr_rate = rates['emr_rates'].get(primary_type, 0.048)
+        spot_rate = rates.get('spot_rates', {}).get(primary_type, ec2_rate)
+        total_ec2_cost = instance_count * ec2_rate * cluster_runtime_hours
+        total_emr_ec2_uplift = instance_count * emr_rate * cluster_runtime_hours
+        # Master on-demand, core nodes on spot
+        total_ec2_spot_cost = (1 * ec2_rate + max(0, instance_count - 1) * spot_rate) * cluster_runtime_hours
+
+    # 4. Composite costs for each deployment option
+    total_emr_ec2_od = total_ec2_cost + total_emr_ec2_uplift                    # EC2 on-demand
+    total_emr_ec2_spot = total_ec2_spot_cost + total_emr_ec2_uplift             # EC2 spot (spot instances + EMR uplift)
+    total_emr_eks_od = total_ec2_cost + cluster_runtime_hours * eks_cluster_rate # EKS on-demand (EC2 + EKS cluster fee, NO EMR EC2 uplift)
+    total_emr_eks_spot = total_ec2_spot_cost + cluster_runtime_hours * eks_cluster_rate  # EKS spot
+
     total_job_minutes = sum(a.get('job_runtime_minutes', 120) for a in applications)
     total_vcpu_hours = sum((a.get('job_runtime_minutes', 120) / 60) * a.get('spark_executors', 10) * a.get('spark_executor_cores', 4) for a in applications)
     total_mem_hours = sum((a.get('job_runtime_minutes', 120) / 60) * a.get('spark_executors', 10) * a.get('spark_executor_memory_gb', 16) for a in applications)
@@ -2790,10 +3178,12 @@ def get_emr_pricing(
         share = app.get('job_runtime_minutes', 120) / total_job_minutes if total_job_minutes > 0 else 1 / max(len(applications), 1)
 
         sls_cost = round(vcpu_hrs * sls_vcpu + mem_hrs * sls_mem, 4)
-        ec2_cost = round(share * (total_ec2_cost + total_emr_uplift), 4)
-        eks_cost = round(share * (total_ec2_cost + cluster_runtime_hours * eks_cluster_rate) + vcpu_hrs * eks_vcpu + mem_hrs * eks_mem, 4)
+        ec2_cost = round(share * total_emr_ec2_od, 4)
+        ec2_spot_cost = round(share * total_emr_ec2_spot, 4)
+        eks_cost = round(share * total_emr_eks_od + vcpu_hrs * eks_vcpu + mem_hrs * eks_mem, 4)
+        eks_spot_cost = round(share * total_emr_eks_spot + vcpu_hrs * eks_vcpu + mem_hrs * eks_mem, 4)
 
-        costs = {'EMR Serverless': sls_cost, 'EMR on EC2': ec2_cost, 'EMR on EKS': eks_cost}
+        costs = {'EMR Serverless': sls_cost, 'EMR on EC2': ec2_cost, 'EMR on EC2 (Spot)': ec2_spot_cost, 'EMR on EKS': eks_cost, 'EMR on EKS (Spot)': eks_spot_cost}
         recommended = min(costs, key=costs.get)
 
         app_results.append({
@@ -2802,8 +3192,10 @@ def get_emr_pricing(
             'job_runtime_minutes': app.get('job_runtime_minutes', 120),
             'cost_analysis': {
                 'EMR Serverless': f"${sls_cost} = {vcpu_hrs:.1f} vCPU-hrs × ${sls_vcpu} + {mem_hrs:.1f} GB-hrs × ${sls_mem}",
-                'EMR on EC2': f"${ec2_cost} = {normalized_instance_hours} normalized-hrs × (${ec2_rate} + ${emr_uplift})",
-                'EMR on EKS': f"${eks_cost} = EC2 share + EKS cluster + {vcpu_hrs:.1f} vCPU-hrs × ${eks_vcpu} + {mem_hrs:.1f} GB-hrs × ${eks_mem}",
+                'EMR on EC2': f"${ec2_cost} = {share:.1%} share of ${total_emr_ec2_od:.4f} (on-demand)",
+                'EMR on EC2 (Spot)': f"${ec2_spot_cost} = {share:.1%} share of ${total_emr_ec2_spot:.4f} (spot)",
+                'EMR on EKS': f"${eks_cost} = {share:.1%} share of ${total_emr_eks_od:.4f} + EKS uplift",
+                'EMR on EKS (Spot)': f"${eks_spot_cost} = {share:.1%} share of ${total_emr_eks_spot:.4f} + EKS uplift",
             },
             'recommended_deployment': recommended,
             'savings_vs_most_expensive': round(max(costs.values()) - min(costs.values()), 4),
@@ -2811,30 +3203,52 @@ def get_emr_pricing(
 
     utilization = round((total_job_minutes / 60 / cluster_runtime_hours * 100), 2) if cluster_runtime_hours > 0 else 0
 
+    # Calculate AWS Glue cost estimate — only when user signals interest in managed/visual features
+    glue_estimate = None
+    workload_desc = _workflow_data.get('workload_description', '').lower()
+    glue_keywords = ['glue', 'visual', 'no-code', 'no code', 'drag and drop', 'managed etl',
+                     'data quality', 'crawler', 'bookmark', 'console', 'serverless etl',
+                     'all options', 'all deployment', 'compare all', 'include glue']
+    show_glue = any(kw in workload_desc for kw in glue_keywords)
+    if show_glue:
+        try:
+            from glue_cost_estimator import estimate_glue_cost
+            glue_estimate = estimate_glue_cost(applications, region=region)
+        except Exception as e:
+            logger.warning(f"Failed to estimate Glue cost: {e}")
+    else:
+        glue_estimate = {'note': 'AWS Glue pricing not shown. Mention "glue", "visual ETL", "no-code", or "compare all options" to include Glue in the comparison.'}
+
     # Detect if using real data or defaults
-    has_real_cluster_data = bool(timing.get('cluster_runtime_hours')) and timing.get('normalized_instance_hours', 0) > 0
-    has_real_spark_data = any(a.get('workload_characteristics') not in (None, 'mixed', 'batch_processing', 'error_fallback') for a in applications)
+    has_real_cluster_data = bool(timing.get('cluster_runtime_hours')) and cluster.get('instance_count', 0) > 0
+    has_real_spark_data = any(a.get('executor_count_method') == 'direct_shs_api' for a in applications) or \
+                          any(a.get('workload_characteristics') not in (None, 'mixed', 'batch_processing', 'error_fallback') for a in applications)
     data_quality = 'measured' if (has_real_cluster_data and has_real_spark_data) else 'estimated_defaults'
 
-    return {
+    pricing_return = {
         'status': 'success',
         'data_quality': data_quality,
         'data_quality_warning': None if data_quality == 'measured' else
             '⚠️ Results use estimated defaults — not real cluster/Spark data. Do NOT cite specific numbers as findings. Re-run with accessible cluster ID and Spark app for accurate analysis.',
         'IMPORTANT': 'Use the EXACT cost numbers from cost_analysis and calculation_breakdown below. Do NOT recalculate or round these figures.',
         'individual_workload_analysis': app_results,
+        'aws_glue_estimate': glue_estimate,
         'cluster_context': {
             'cluster_runtime_hours': cluster_runtime_hours,
-            'normalized_instance_hours': normalized_instance_hours,
+            'total_instance_hours': round(sum(i['runtime_hours'] for i in instance_details) if instance_details else instance_count * cluster_runtime_hours, 2),
             'utilization_percentage': utilization,
             'spot_instance_percentage': cluster.get('spot_instance_percentage', 0),
             'autoscaling_enabled': cluster.get('autoscaling_enabled', False),
+            'estimated_from_spark_data': estimated_cluster,
+            'estimated_instance_type': cluster.get('instance_type') if estimated_cluster else None,
+            'estimated_instance_count': instance_count if estimated_cluster else None,
         },
         'pricing_rates': rates,
         'pricing_components': {
             'emr_serverless': f"${sls_vcpu}/vCPU-hr + ${sls_mem}/GB-hr",
-            'emr_on_ec2': f"${ec2_rate}/normalized-hr (EC2) + ${emr_uplift}/normalized-hr (EMR uplift)",
+            'emr_on_ec2': {itype: f"${rates['ec2_rates'].get(itype, 0)}/hr EC2 + ${rates['emr_rates'].get(itype, 0)}/hr EMR" for itype in rates.get('ec2_rates', {})},
             'emr_on_eks': f"${eks_cluster_rate}/hr (EKS cluster) + EC2 + ${eks_vcpu}/vCPU-hr + ${eks_mem}/GB-hr (EMR uplift)",
+            'billing_method': 'per-second with per-instance-type rates',
         },
         'optimization_insights': {
             'cluster_utilization': f'{utilization}% — {"very low, ideal for serverless" if utilization < 10 else "moderate"}',
@@ -2844,11 +3258,95 @@ def get_emr_pricing(
         # FINAL EVIDENCE-BASED RECOMMENDATION
         # Weighs: cost (40%) + workload fit (30%) + operational fit (20%) + constraints (10%)
         'recommendation': _build_evidence_based_recommendation(
-            app_results, extracted_spark_data, extracted_cluster_data, utilization
+            app_results, extracted_spark_data, extracted_cluster_data, utilization,
+            has_kubernetes_experience=_workflow_data.get('has_kubernetes_experience', False),
         ),
 
         'analysis_timestamp': datetime.utcnow().isoformat(),
     }
+
+    # Store for report generation (on-demand only)
+    _workflow_data['pricing_result'] = pricing_return
+    return pricing_return
+
+@mcp.tool()
+def generate_report(region: str = 'us-east-1') -> Dict[str, Any]:
+    """
+    Generate an HTML report from the analysis results. Call ONLY when the user
+    explicitly asks for a report (e.g., "generate a report", "save the results").
+    Do NOT call this automatically after every analysis.
+
+    Args:
+        region: AWS region (for display in report header)
+    """
+    pricing_result = _workflow_data.get('pricing_result')
+    if not pricing_result:
+        return {'status': 'error', 'message': 'No pricing data available. Run get_emr_pricing first.'}
+
+    try:
+        from report_generator import generate_report as _gen_report
+        result = _gen_report(
+            pricing_result=pricing_result,
+            workload_description=_workflow_data.get('workload_description', ''),
+            region=region,
+            has_kubernetes_experience=_workflow_data.get('has_kubernetes_experience', False),
+        )
+        return result
+    except Exception as e:
+        return {'status': 'error', 'message': f'Failed to generate report: {str(e)}'}
+
+
+@mcp.tool()
+def analyze_glue_job(
+    job_name: str,
+    region: str = 'us-east-1',
+) -> Dict[str, Any]:
+    """
+    Analyze an existing AWS Glue job and estimate what it would cost on EMR deployment options.
+
+    Fetches the Glue job's most recent successful run, maps the worker config to
+    equivalent Spark executor config, and stores it for get_emr_pricing to use.
+
+    Use this when a customer is running on Glue and wants to know if EMR would be cheaper.
+
+    Args:
+        job_name: AWS Glue job name
+        region: AWS region
+    """
+    try:
+        from glue_cost_estimator import analyze_glue_job as _analyze_glue
+
+        result = _analyze_glue(job_name, region=region)
+        if result.get('status') != 'success':
+            return result
+
+        # Store in workflow data so get_emr_pricing can use it
+        _workflow_data['spark_applications'] = result['spark_applications']
+        _workflow_data['cluster_data'] = {
+            'timing_analysis': {
+                'cluster_runtime_hours': result['primary_run']['glue_config']['execution_time_minutes'] / 60,
+            },
+            'cluster_analysis': {
+                'instance_count': 0,
+                'instance_type': 'glue_workers',
+            },
+            'pattern_analysis': {},
+        }
+        _workflow_state['spark_analyzed'] = True
+        _workflow_state['cluster_analyzed'] = True
+
+        return {
+            'status': 'success',
+            'NEXT_STEP': 'Call get_emr_pricing() to compare costs across EMR options.',
+            'glue_job': job_name,
+            'actual_glue_cost': result['actual_glue_cost'],
+            'glue_config': result['primary_run']['glue_config'],
+            'spark_equivalent': result['primary_run']['spark_equivalent'],
+            'note': result['note'],
+        }
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
 
 # =============================================================================
 # MAIN EXECUTION

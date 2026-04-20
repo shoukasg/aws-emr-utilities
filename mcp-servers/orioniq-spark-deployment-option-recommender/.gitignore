@@ -127,6 +127,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+test_env/
+pptx_env/
 
 # Spyder project settings
 .spyderproject
@@ -302,11 +304,14 @@ embeddings/
 chroma_db/
 pinecone_cache/
 
-# Test files and temporary scripts
-test_*.py
-temp_*.py
-debug_*.py
-scratch_*.py
+# Test files and temporary scripts (root level only)
+/test_*.py
+/temp_*.py
+/debug_*.py
+/scratch_*.py
+
+# Allow evals directory
+!evals/
 
 # OrionIQ development and testing files
 test_mcp_*.py
@@ -366,6 +371,7 @@ workflow_state/
 *.parquet
 *.avro
 large_datasets/
+test_data/
 
 # User-specific configuration overrides
 config.local.yaml
@@ -374,4 +380,10 @@ user-config.yaml
 
 # Generated documentation
 api_docs/
-generated_docs/
+generated_docs/CHANGELOG.md
+REFACTORING.md
+main.py
+REFACTORING.md
+src/emr_advisor_strands_agent.py
+Architecture.png
+templates/
