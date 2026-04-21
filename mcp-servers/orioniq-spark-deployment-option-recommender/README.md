@@ -27,7 +27,7 @@ That requires three things no general-purpose LLM has:
 - [uv](https://docs.astral.sh/uv/) package manager
 - AWS credentials configured (`aws configure` or `AWS_PROFILE`)
 - Access to an EMR cluster you want to analyze
-- **Optional:** [Spark History Server MCP](https://github.com/aws-samples/mcp-apache-spark-history-server) — required only for app-ID-only analysis (no cluster ID). Not needed when analyzing EMR clusters directly.
+- **Optional:** [Spark History Server MCP](https://github.com/kubeflow/mcp-apache-spark-history-server) — required only for app-ID-only analysis (no cluster ID). Not needed when analyzing EMR clusters directly.
 
 ### Installation
 
