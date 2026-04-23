@@ -227,8 +227,6 @@ The final recommendation weighs four factors from real data. Weights adjust base
 
 When you pick two priorities, the weights are averaged. When you pick none, defaults apply.
 
-Hard constraints (e.g., no Kubernetes experience) are enforced as post-scoring overrides — they cap the score regardless of weights. A user who says "performance matters, cost doesn't" will still never get an EKS recommendation if they have no K8s experience.
-
 ## Testing
 
 ### Eval Framework
