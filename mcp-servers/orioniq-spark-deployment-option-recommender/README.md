@@ -1,6 +1,6 @@
 # 🚀 OrionIQ — AI-Powered Data Platform Advisor
 
-> Analyzes your real workloads, clusters, and costs — combined with a curated expert knowledge base of AWS best practices, blogs, and deployment guides — to recommend the optimal data platform deployment backed by actual metrics, not just keyword matching.
+> Analyzes your real workloads, clusters, and costs — combined with a customizable knowledge base where you can add your own best practices, blog posts, and deployment guides — to recommend the optimal data platform deployment backed by actual metrics, not just keyword matching.
 
 **Current focus:** AWS EMR (EC2, EKS, Serverless) and AWS Glue
 
@@ -17,7 +17,7 @@ An LLM with cloud docs can say *"EMR Serverless is good for batch."* OrionIQ say
 That requires three things no general-purpose LLM has:
 1. **Real metrics** from your actual cluster and Spark jobs
 2. **Live pricing** from the AWS Pricing API
-3. **Curated expert knowledge** — best practices docs, AWS blog posts, and deployment model guides indexed and searchable at analysis time
+3. **Customizable knowledge base** — bring your own best practices, blog posts, and deployment guides. Add them to `config.yaml` and they're indexed and searchable at analysis time
 
 ## Getting Started
 
