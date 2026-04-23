@@ -216,14 +216,18 @@ User Request
 
 ### Evidence-Based Scoring
 
-The final recommendation weighs four factors from real data:
+The final recommendation weighs four factors from real data. Weights adjust based on user priorities — if you say "performance matters most," workload fit gets 50% instead of 30%.
 
-| Factor | Weight | Source |
-|--------|--------|--------|
-| Cost | 40% | Real-time AWS Pricing API |
-| Workload fit | 30% | Spark metrics + cluster patterns + expert knowledge |
-| Operational fit | 20% | Cluster utilization analysis |
-| Constraints | 10% | User-provided preferences |
+| Factor | Default | Cost priority | Performance priority | Operations priority |
+|--------|---------|--------------|---------------------|-------------------|
+| Cost | 40% | **60%** | 15% | 20% |
+| Workload fit | 30% | 20% | **50%** | 15% |
+| Operational fit | 20% | 15% | 20% | **50%** |
+| Constraints | 10% | 5% | 15% | 15% |
+
+When you pick two priorities, the weights are averaged. When you pick none, defaults apply.
+
+Hard constraints (e.g., no Kubernetes experience) are enforced as post-scoring overrides — they cap the score regardless of weights. A user who says "performance matters, cost doesn't" will still never get an EKS recommendation if they have no K8s experience.
 
 ## Testing
 

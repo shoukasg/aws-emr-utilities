@@ -2386,6 +2386,7 @@ def collect_workload_context(
         _workflow_state['context_collected'] = True
         _workflow_data['has_kubernetes_experience'] = has_kubernetes_experience
         _workflow_data['workload_description'] = workload_description
+        _workflow_data['preferences'] = preferences or []
 
         return {
             'status': 'success',
@@ -2863,16 +2864,45 @@ def fetch_pricing_rates(region: str, instance_types: Optional[List[str]] = None)
     rates['location'] = location
     return rates
 
+# Priority-aware scoring weights
+WEIGHT_PRESETS = {
+    'cost':        {'cost': 0.60, 'workload': 0.20, 'ops': 0.15, 'constraints': 0.05},
+    'performance': {'cost': 0.15, 'workload': 0.50, 'ops': 0.20, 'constraints': 0.15},
+    'operations':  {'cost': 0.20, 'workload': 0.15, 'ops': 0.50, 'constraints': 0.15},
+    'reliability': {'cost': 0.15, 'workload': 0.30, 'ops': 0.40, 'constraints': 0.15},
+    'scalability': {'cost': 0.15, 'workload': 0.40, 'ops': 0.30, 'constraints': 0.15},
+}
+DEFAULT_WEIGHTS = {'cost': 0.40, 'workload': 0.30, 'ops': 0.20, 'constraints': 0.10}
+
+def _resolve_weights(preferences: Optional[List[str]] = None) -> Dict[str, float]:
+    """Resolve user preferences to scoring weights. The agent normalizes user
+    phrasing — we just match canonical keywords. Averages when multiple given."""
+    if not preferences:
+        return DEFAULT_WEIGHTS.copy()
+    matched = []
+    for pref in preferences:
+        pref_lower = pref.lower()
+        for key in WEIGHT_PRESETS:
+            if key in pref_lower:
+                matched.append(WEIGHT_PRESETS[key])
+                break
+    if not matched:
+        return DEFAULT_WEIGHTS.copy()
+    return {k: round(sum(m[k] for m in matched) / len(matched), 2) for k in DEFAULT_WEIGHTS}
+
+
 def _build_evidence_based_recommendation(
     app_results: List[Dict],
     spark_data: Dict[str, Any],
     cluster_data: Dict[str, Any],
     utilization: float,
     has_kubernetes_experience: bool = False,
+    weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
     Final evidence-based recommendation combining cost, workload fit, operational fit, and constraints.
     This is the ONLY place a deployment recommendation is made — backed by real data.
+    Weights are priority-aware — adjusted based on user preferences.
     """
     cluster = cluster_data.get('cluster_analysis', {})
     pattern = cluster_data.get('pattern_analysis', {})
@@ -2946,14 +2976,16 @@ def _build_evidence_based_recommendation(
         constraint_scores['EMR on EKS'] = 0
         evidence['EMR on EKS'].append("No Kubernetes experience — significant operational risk")
 
+    w = weights or DEFAULT_WEIGHTS
+
     # --- Weighted final score ---
     final_scores = {}
     for opt in total_by_option:
         final_scores[opt] = round(
-            cost_scores.get(opt, 50) * 0.4 +
-            workload_scores.get(opt, 50) * 0.3 +
-            ops_scores.get(opt, 50) * 0.2 +
-            constraint_scores.get(opt, 50) * 0.1,
+            cost_scores.get(opt, 50) * w['cost'] +
+            workload_scores.get(opt, 50) * w['workload'] +
+            ops_scores.get(opt, 50) * w['ops'] +
+            constraint_scores.get(opt, 50) * w['constraints'],
             1
         )
 
@@ -2962,13 +2994,6 @@ def _build_evidence_based_recommendation(
         other_scores = [s for o, s in final_scores.items() if o != 'EMR on EKS']
         if other_scores:
             final_scores['EMR on EKS'] = min(final_scores['EMR on EKS'], min(other_scores) - 1)
-        final_scores[opt] = round(
-            cost_scores.get(opt, 50) * 0.4 +
-            workload_scores.get(opt, 50) * 0.3 +
-            ops_scores.get(opt, 50) * 0.2 +
-            constraint_scores.get(opt, 50) * 0.1,
-            1
-        )
 
     ranked = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
     primary = ranked[0]
@@ -2990,7 +3015,7 @@ def _build_evidence_based_recommendation(
             }
             for opt, score in ranked
         ],
-        'scoring_weights': {'cost': '40%', 'workload_fit': '30%', 'operational_fit': '20%', 'constraints': '10%'},
+        'scoring_weights': {k: f"{int(v*100)}%" for k, v in w.items()},
         'key_insight': f"Recommended {primary[0]} (score: {primary[1]}) based on actual cluster metrics, Spark workload analysis, and real-time pricing.",
     }
 
@@ -3256,10 +3281,11 @@ def get_emr_pricing(
         },
 
         # FINAL EVIDENCE-BASED RECOMMENDATION
-        # Weighs: cost (40%) + workload fit (30%) + operational fit (20%) + constraints (10%)
+        # Weighs factors based on user priorities (default: cost 40%, workload 30%, ops 20%, constraints 10%)
         'recommendation': _build_evidence_based_recommendation(
             app_results, extracted_spark_data, extracted_cluster_data, utilization,
             has_kubernetes_experience=_workflow_data.get('has_kubernetes_experience', False),
+            weights=_resolve_weights(_workflow_data.get('preferences')),
         ),
 
         'analysis_timestamp': datetime.utcnow().isoformat(),
