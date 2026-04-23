@@ -242,21 +242,6 @@ uv run python3 evals/test_evals.py
 | **3. Recommendation Correctness** | Golden answers: wasteful→Serverless, efficient→EC2, spot-heavy+K8s→EKS, streaming→not Serverless | 4 |
 | **4. Adversarial Cost Validation** | Independent recalculation verifies tool math, per-second billing confirmed, mixed instance types correct | 7 |
 
-### End-to-End Determinism Test
-
-Runs the full agent pipeline N times against a real cluster and compares dollar amounts:
-
-```bash
-export AWS_PROFILE="your-profile"
-export AWS_REGION="us-east-1"
-export EMR_CLUSTER_ID="j-YOUR-CLUSTER-ID"
-export APP_ID="application_XXXX_YYYY"
-export ORIONIQ_DIR="$(pwd)"
-export SPARK_HISTORY_MCP_DIR="/path/to/mcp-apache-spark-history-server"
-
-uv run python3 test_deterministic.py
-```
-
 ## Project Structure
 
 ```
