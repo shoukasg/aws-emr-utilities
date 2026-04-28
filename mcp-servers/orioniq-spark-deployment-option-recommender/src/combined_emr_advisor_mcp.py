@@ -2083,9 +2083,6 @@ def analyze_cluster_patterns(
             cluster_resp = emr_client.describe_cluster(ClusterId=cluster_id)
             cluster_info = cluster_resp.get('Cluster', {})
 
-            steps_resp = emr_client.list_steps(ClusterId=cluster_id)
-            steps = steps_resp.get('Steps', [])
-
             instances_resp = emr_client.list_instances(ClusterId=cluster_id)
             instances = instances_resp.get('Instances', [])
 
@@ -2097,8 +2094,8 @@ def analyze_cluster_patterns(
             except Exception:
                 pass
 
-            # Feed into EMRPatternAnalyzer — the class that was previously dead code
-            cluster_data = {'cluster_info': cluster_info, 'steps': steps, 'instances': instances}
+            # Feed into EMRPatternAnalyzer
+            cluster_data = {'cluster_info': cluster_info, 'steps': [], 'instances': instances}
             pattern = unified_engine.pattern_analyzer.analyze_cluster_patterns(cluster_data)
 
             # Extract timing from cluster timeline
@@ -2114,14 +2111,6 @@ def analyze_cluster_patterns(
                 cluster_runtime_hours = (effective_end_time - creation_time).total_seconds() / 3600
             if creation_time and ready_time:
                 bootstrapping_minutes = (ready_time - creation_time).total_seconds() / 60
-
-            # Calculate total job execution from steps
-            total_job_seconds = 0
-            for step in steps:
-                st = step.get('Status', {}).get('Timeline', {})
-                s_start, s_end = st.get('StartDateTime'), st.get('EndDateTime')
-                if s_start and s_end:
-                    total_job_seconds += (s_end - s_start).total_seconds()
 
             # Spot instance analysis
             spot_count = sum(1 for i in instances if i.get('Market') == 'SPOT')
@@ -2152,80 +2141,60 @@ def analyze_cluster_patterns(
 
             normalized_hours = cluster_info.get('NormalizedInstanceHours', 0)
 
-            # Discover Spark application IDs from step stderr logs in S3
+            # Fetch Spark data directly from EMR Persistent App UI (SHS)
+            # Single source for: app discovery + executor metrics + job runtimes
             discovered_app_ids = []
-            log_uri = cluster_info.get('LogUri', '')
-            if log_uri and steps:
-                try:
-                    import gzip
-                    s3_log_base = log_uri.replace('s3n://', 's3://').rstrip('/')
-                    s3_parts = s3_log_base.replace('s3://', '').split('/', 1)
-                    log_bucket = s3_parts[0]
-                    log_prefix = s3_parts[1] if len(s3_parts) > 1 else ''
-
-                    s3_client = boto3.client('s3', region_name=region)
-                    for step in steps:
-                        step_id = step.get('Id', '')
-                        if not step_id or step.get('Status', {}).get('State') != 'COMPLETED':
-                            continue
-                        stderr_key = f"{log_prefix}/{cluster_id}/steps/{step_id}/stderr.gz"
-                        try:
-                            resp = s3_client.get_object(Bucket=log_bucket, Key=stderr_key)
-                            text = gzip.decompress(resp['Body'].read()).decode('utf-8', errors='ignore')
-                            app_ids = re.findall(r'(application_\d+_\d+)', text)
-                            if app_ids:
-                                discovered_app_ids.append({
-                                    'step_id': step_id,
-                                    'step_name': step.get('Name', ''),
-                                    'application_id': sorted(set(app_ids))[0],
-                                })
-                        except Exception:
-                            pass
-                except Exception as e:
-                    logger.warning(f"Failed to discover application IDs from logs: {e}")
-
-            # Fetch Spark executor data directly via EMR Persistent App UI REST API
-            # This eliminates agent marshalling non-determinism
             spark_applications_data = []
             all_raw_executors = []
-            if discovered_app_ids:
+            total_job_seconds = 0
+            try:
+                from urllib.parse import urlparse as _urlparse
+                cluster_arn = cluster_info.get('ClusterArn', '')
                 try:
-                    from urllib.parse import urlparse as _urlparse
-                    cluster_arn = cluster_info.get('ClusterArn', '')
-                    try:
-                        ui_resp = emr_client.create_persistent_app_ui(TargetResourceArn=cluster_arn, Tags=[])
-                        ui_id = ui_resp['PersistentAppUIId']
-                        logger.info(f"Persistent App UI created/found: {ui_id}")
-                    except Exception as e:
-                        ui_id = f"p-{cluster_id[2:]}"
-                        logger.info(f"Using convention UI ID: {ui_id} (create error: {str(e)[:100]})")
+                    ui_resp = emr_client.create_persistent_app_ui(TargetResourceArn=cluster_arn, Tags=[])
+                    ui_id = ui_resp['PersistentAppUIId']
+                    logger.info(f"Persistent App UI created/found: {ui_id}")
+                except Exception as e:
+                    ui_id = f"p-{cluster_id[2:]}"
+                    logger.info(f"Using convention UI ID: {ui_id} (create error: {str(e)[:100]})")
 
-                    url_resp = emr_client.get_persistent_app_ui_presigned_url(PersistentAppUIId=ui_id, PersistentAppUIType='SHS')
-                    presigned_url = url_resp.get('PresignedURL', '')
-                    if presigned_url:
-                        shs_session = requests.Session()
-                        init_resp = shs_session.get(presigned_url, timeout=30, allow_redirects=True)
-                        parsed_shs = _urlparse(init_resp.url)
-                        shs_base = f"{parsed_shs.scheme}://{parsed_shs.netloc}/shs/api/v1"
-                        logger.info(f"SHS base URL: {shs_base}, init status: {init_resp.status_code}")
+                url_resp = emr_client.get_persistent_app_ui_presigned_url(PersistentAppUIId=ui_id, PersistentAppUIType='SHS')
+                presigned_url = url_resp.get('PresignedURL', '')
+                if presigned_url:
+                    shs_session = requests.Session()
+                    init_resp = shs_session.get(presigned_url, timeout=30, allow_redirects=True)
+                    parsed_shs = _urlparse(init_resp.url)
+                    shs_base = f"{parsed_shs.scheme}://{parsed_shs.netloc}/shs/api/v1"
+                    logger.info(f"SHS base URL: {shs_base}, init status: {init_resp.status_code}")
 
+                    # Discover all applications directly from SHS
+                    apps_resp = shs_session.get(f"{shs_base}/applications", timeout=15)
+                    if apps_resp.status_code == 200:
+                        all_apps = apps_resp.json()
+                        for app in all_apps:
+                            aid = app.get('id', '')
+                            if not aid:
+                                continue
+                            discovered_app_ids.append({
+                                'application_id': aid,
+                                'step_name': app.get('name', ''),
+                            })
+
+                        # Fetch executor data for each app
                         for app_info in discovered_app_ids:
                             aid = app_info['application_id']
                             try:
-                                app_resp = shs_session.get(f"{shs_base}/applications/{aid}", timeout=10)
-                                if app_resp.status_code != 200:
-                                    logger.warning(f"SHS app endpoint failed for {aid}: {app_resp.status_code}")
+                                app_detail = shs_session.get(f"{shs_base}/applications/{aid}", timeout=10)
+                                if app_detail.status_code != 200:
                                     continue
-                                app_resp = app_resp.json()
-                                # Try allexecutors, then with attempt ID fallback
+                                app_data = app_detail.json()
+
                                 exec_url = f"{shs_base}/applications/{aid}/allexecutors"
                                 exec_resp_raw = shs_session.get(exec_url, timeout=10)
                                 if exec_resp_raw.status_code != 200:
-                                    # Fallback: use attempt ID 1
                                     exec_url = f"{shs_base}/applications/{aid}/1/allexecutors"
                                     exec_resp_raw = shs_session.get(exec_url, timeout=10)
                                 if exec_resp_raw.status_code != 200:
-                                    logger.warning(f"SHS executor endpoint failed for {aid}: {exec_resp_raw.status_code}")
                                     continue
                                 exec_resp = exec_resp_raw.json()
                                 all_raw_executors.extend(exec_resp)
@@ -2235,19 +2204,16 @@ def analyze_cluster_patterns(
                                 mem_bytes = non_driver[0].get('maxMemory', 4 * 1073741824) if non_driver else 4 * 1073741824
                                 mem_gb = round(mem_bytes / 1073741824, 1)
 
-                                # Duration from step timeline (more reliable than SHS)
-                                step_dur_min = None
-                                for step in steps:
-                                    if step.get('Id') == app_info.get('step_id'):
-                                        st = step.get('Status', {}).get('Timeline', {})
-                                        if st.get('StartDateTime') and st.get('EndDateTime'):
-                                            step_dur_min = round((st['EndDateTime'] - st['StartDateTime']).total_seconds() / 60, 2)
-                                        break
+                                # Job runtime from SHS app duration (in attempts)
+                                attempts = app_data.get('attempts', [])
+                                duration_ms = attempts[0].get('duration', 0) if attempts else 0
+                                app_duration_min = round(duration_ms / 60000, 2)
+                                total_job_seconds += duration_ms / 1000
 
                                 spark_applications_data.append({
                                     'application_id': aid,
-                                    'job_name': app_resp.get('name', app_info.get('step_name', '')),
-                                    'job_runtime_minutes': step_dur_min or round((app_resp.get('duration', 0) or 0) / 60000, 2),
+                                    'job_name': app_data.get('name', app_info.get('step_name', '')),
+                                    'job_runtime_minutes': app_duration_min,
                                     'spark_executors': len(non_driver),
                                     'spark_executor_cores': cores,
                                     'spark_executor_memory_gb': mem_gb,
@@ -2256,8 +2222,10 @@ def analyze_cluster_patterns(
                                 })
                             except Exception as e:
                                 logger.warning(f"Failed to fetch Spark data for {aid}: {e}")
-                except Exception as e:
-                    logger.warning(f"Failed to access Spark History Server via EMR API: {type(e).__name__}: {e}")
+                    else:
+                        logger.warning(f"SHS /applications endpoint failed: {apps_resp.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to access Spark History Server via EMR API: {type(e).__name__}: {e}")
 
             cluster_result = {
                 'cluster_id': cluster_id,
@@ -2273,7 +2241,7 @@ def analyze_cluster_patterns(
                     'instance_type': primary_instance_type,
                     'multi_az_deployment': len(azs) > 1,
                     'instance_count': len(instances),
-                    'step_count': len(steps),
+                    'step_count': len(discovered_app_ids),
                     'instance_runtime_details': instance_runtime_details,
                 },
                 'pattern_analysis': {
@@ -2318,12 +2286,14 @@ def analyze_cluster_patterns(
     }
 
     has_spark_data = bool(primary.get('spark_applications'))
+    discovered_ids = primary.get('discovered_application_ids', [])
 
     return {
         'status': 'success',
         'NEXT_STEP': 'Call analyze_spark_job_config() with NO arguments.',
         'spark_metrics_available': has_spark_data,
-        'applications_found': len(primary.get('spark_applications', [])),
+        'applications_found': len(discovered_ids),
+        'discovered_application_ids': discovered_ids,
         'clusters_analyzed': len(all_cluster_results),
         'timing_analysis': primary.get('timing_analysis', {}),
         'cluster_analysis': primary.get('cluster_analysis', {}),
@@ -2589,6 +2559,7 @@ def analyze_spark_job_config(
             },
             'analysis_details': {}
         }
+            _workflow_data['spark_data'] = result
             return result
 
         
