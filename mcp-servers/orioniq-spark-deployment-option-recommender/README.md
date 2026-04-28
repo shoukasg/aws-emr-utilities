@@ -195,8 +195,7 @@ User Request
 │   - EMR API (clusters, instances)   │
 │   - EC2 API (spot prices)           │
 │   - Pricing API (on-demand rates)   │
-│   - S3 (step logs for app IDs)      │
-│   - EMR Persistent App UI (SHS)    │
+│   - EMR Persistent App UI (SHS)     │
 └─────────────────────────────────────┘
 ```
 
@@ -209,7 +208,7 @@ User Request
 | `search_knowledge_base` | — | Semantic search over expert content |
 | `collect_workload_context` | 1 | Gathers user constraints + knowledge insights. No scoring — just context. |
 | `analyze_spark_job_config` | 2 | Extracts Spark config from event logs or History Server |
-| `analyze_cluster_patterns` | 3 | Analyzes EMR cluster via direct boto3 (idle time, spot usage, autoscaling). Discovers Spark app IDs and fetches executor data from SHS. |
+| `analyze_cluster_patterns` | 3 | Analyzes EMR cluster via direct boto3 (idle time, spot usage, autoscaling). Discovers Spark apps and fetches executor data from SHS. |
 | `get_emr_pricing` | 4 | Fetches live AWS pricing (on-demand + spot) + produces weighted evidence-based recommendation. Includes Glue pricing when triggered. |
 | `generate_report` | — | Generates deterministic HTML report from analysis results. On-demand only — call when user asks for a report. |
 | `analyze_glue_job` | — | Analyzes an existing Glue job and estimates EMR costs for migration comparison. |
@@ -308,14 +307,12 @@ OrionIQ calls the following AWS APIs via boto3. Minimum IAM policy:
       "Effect": "Allow",
       "Action": [
         "elasticmapreduce:DescribeCluster",
-        "elasticmapreduce:ListSteps",
         "elasticmapreduce:ListInstances",
         "elasticmapreduce:GetManagedScalingPolicy",
         "elasticmapreduce:CreatePersistentAppUI",
         "elasticmapreduce:GetPersistentAppUIPresignedURL",
         "ec2:DescribeSpotPriceHistory",
         "pricing:GetProducts",
-        "s3:GetObject",
         "glue:GetJobRuns"
       ],
       "Resource": "*"
@@ -325,7 +322,6 @@ OrionIQ calls the following AWS APIs via boto3. Minimum IAM policy:
 ```
 
 **Notes:**
-- `s3:GetObject` is used to read EMR step stderr logs for Spark application ID discovery. Scope to your EMR log bucket if possible.
 - `elasticmapreduce:CreatePersistentAppUI` is a write action — it creates a persistent Spark History Server UI for the cluster if one doesn't exist. Required for fetching Spark executor data from terminated clusters. If your environment restricts write actions, the tool will fall back to default Spark metrics.
 
 ## Contributing

@@ -32,10 +32,10 @@ If Step 3 could not access the Spark History Server, the tool uses defaults (10 
 ### Step 3: analyze_cluster_patterns()
 
 Pass `cluster_ids` and `region`. This tool:
-- Fetches cluster metadata, instances, and steps via boto3
+- Fetches cluster metadata and instances via boto3
 - Calculates idle time, spot usage, bootstrap overhead, utilization
-- **Discovers Spark application IDs** from step stderr logs in S3
-- **Fetches Spark executor data directly** from the Spark History Server via EMR Persistent App UI presigned URL
+- **Discovers Spark applications directly** from the Spark History Server via EMR Persistent App UI
+- **Fetches executor data and job runtimes** from SHS — single source for all Spark metrics
 - **Stores all data internally** for Step 2 and Step 4 to read — no agent marshalling needed
 
 ### Step 4: get_emr_pricing()
@@ -61,7 +61,7 @@ Steps 2 and 3 can run in either order. However, the PREFERRED order when the use
 Step 0 → Step 1 → Step 3 (discover app IDs) → Step 2 (with discovered IDs) → Step 4
 ```
 
-This is preferred because Step 3 discovers application IDs from the cluster's step logs. Running Step 3 first means Step 2 can use REAL Spark metrics instead of defaults.
+This is preferred because Step 3 discovers application IDs from the Spark History Server. Running Step 3 first means Step 2 can use REAL Spark metrics instead of defaults.
 
 Only run Step 2 before Step 3 if the user already provided application IDs upfront.
 
@@ -104,6 +104,7 @@ One sentence explaining WHY the winner wins, citing specific metrics.
 
 ## RULES
 
+- **EMR billing model**: All EMR deployment options (EC2, EKS, Serverless) bill per-second with a 1-minute minimum. There is NO hourly minimum. Do NOT state "minimum 1-hour billing" — that is outdated and incorrect.
 - Use EXACT cost numbers from get_emr_pricing output — never recalculate or round
 - Always display the calculation_breakdown from get_emr_pricing
 - If Spark History Server is not available, note it as a caveat — do not silently use defaults
@@ -126,3 +127,8 @@ One sentence explaining WHY the winner wins, citing specific metrics.
   - Glue is best suited for teams that value visual authoring, managed experience, and operational simplicity over raw cost efficiency
   - Never dismiss Glue purely on cost — the no-code experience and managed features can save significant engineering time
   - IMPORTANT: If the user mentions "glue", "include glue", "compare all", or "all options" in their prompt, you MUST include the phrase "include glue" in the workload_description when calling collect_workload_context. This triggers the Glue cost calculation in the pricing tool. Do NOT calculate Glue costs manually — the tool handles it.
+- When presenting results from analyze_glue_job (Glue → EMR comparison):
+  - ALWAYS explain the mapping: "Your Glue job uses X workers of type Y. This maps to X-1 Spark executors with Z cores and W GB memory each."
+  - ALWAYS show the actual Glue cost from DPU-seconds (this is the real bill, not an estimate)
+  - Explain WHY EC2/EKS may be more expensive for small jobs: instance minimums, bootstrap overhead, and inability to provision fractional instances. Serverless and Glue bill only for actual compute used.
+  - If EMR Serverless is cheaper than Glue Standard but Glue Flex is close to Serverless, highlight that switching to Glue Flex may be the lowest-effort optimization (no migration needed).
