@@ -2122,7 +2122,7 @@ def analyze_cluster_patterns(
 
             # Per-instance runtime for accurate per-second billing
             instance_runtime_details = []
-            now = datetime.utcnow().replace(tzinfo=creation_time.tzinfo) if creation_time else None
+            now = datetime.now(creation_time.tzinfo) if creation_time else None
             for inst in instances:
                 inst_tl = inst.get('Status', {}).get('Timeline', {})
                 inst_start = inst_tl.get('CreationDateTime')
@@ -2158,8 +2158,16 @@ def analyze_cluster_patterns(
                     ui_id = f"p-{cluster_id[2:]}"
                     logger.info(f"Using convention UI ID: {ui_id} (create error: {str(e)[:100]})")
 
-                url_resp = emr_client.get_persistent_app_ui_presigned_url(PersistentAppUIId=ui_id, PersistentAppUIType='SHS')
-                presigned_url = url_resp.get('PresignedURL', '')
+                # Retry presigned URL — it may not be ready immediately after UI creation
+                import time as _time
+                presigned_url = ''
+                for _attempt in range(3):
+                    url_resp = emr_client.get_persistent_app_ui_presigned_url(PersistentAppUIId=ui_id, PersistentAppUIType='SHS')
+                    presigned_url = url_resp.get('PresignedURL', '')
+                    if presigned_url:
+                        break
+                    logger.info(f"Presigned URL not ready (attempt {_attempt+1}/3), waiting 10s...")
+                    _time.sleep(10)
                 if presigned_url:
                     shs_session = requests.Session()
                     init_resp = shs_session.get(presigned_url, timeout=30, allow_redirects=True)
@@ -2247,8 +2255,12 @@ def analyze_cluster_patterns(
                 'pattern_analysis': {
                     'job_type': pattern.job_type.value,
                     'resource_intensity': pattern.resource_intensity.value,
-                    'resource_efficiency': round(pattern.resource_efficiency, 3),
-                    'idle_time_percentage': round(pattern.idle_time_percentage, 1),
+                    'resource_efficiency': round(
+                        (total_job_seconds / (cluster_runtime_hours * 3600)) if (total_job_seconds > 0 and cluster_runtime_hours > 0)
+                        else pattern.resource_efficiency, 3),
+                    'idle_time_percentage': round(
+                        ((1 - total_job_seconds / (cluster_runtime_hours * 3600)) * 100) if (total_job_seconds > 0 and cluster_runtime_hours > 0)
+                        else pattern.idle_time_percentage, 1),
                     'spot_instance_suitability': round(pattern.spot_instance_suitability, 2),
                     'predictability': round(pattern.predictability, 2),
                     'job_frequency': pattern.job_frequency,
@@ -2260,6 +2272,7 @@ def analyze_cluster_patterns(
                     'release_label': cluster_info.get('ReleaseLabel', ''),
                 },
                 'discovered_application_ids': discovered_app_ids,
+                'spark_history_server_status': f"Connected — found {len(discovered_app_ids)} apps" if discovered_app_ids else "No apps found (check spark.eventLog.enabled and spark.eventLog.dir)",
                 'spark_applications': spark_applications_data,
                 'raw_executors': all_raw_executors,
             }
